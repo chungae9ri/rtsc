@@ -3,6 +3,7 @@ name = "rtsc"
 version = "0.1.0"
 authors = ["Kwangdo Yi <kwangdo.yi@gmail.com>"]
 edition = "2024"
+license = "MIT"
 
 [lib]
 name = "rtsc"
