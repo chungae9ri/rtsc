@@ -87,3 +87,42 @@ fn PendSV() {
 fn SysTick() {
     rprintln!("systick");
 }
+
+pub unsafe fn forkyi(
+    mut sp: *mut u32,
+    entry: extern "C" fn(*mut core::ffi::c_void) -> !,
+    arg: *mut core::ffi::c_void
+) -> *mut u32 {
+    // Full descending stack, sp should point to the last
+    // used (lowest) address of the stack frame.
+    unsafe {
+        sp = sp.sub(1);
+        *sp = arg as u32; // R0: argument to the task entry function
+
+        for _ in 0..4 {
+            sp = sp.sub(1);
+            *sp = 0x0000_0000; // R1-R3, R12: initial values (not used)
+        }
+
+        sp = sp.sub(1);
+        *sp = 0xFFFF_FFFD; // LR: EXC_RETURN value for returning to Thread mode with PSP
+
+        sp = sp.sub(1);
+        *sp = entry as usize as u32; // PC: entry point of the task
+
+        sp = sp.sub(1);
+        *sp = 0x0100_0000; // xPSR: Thumb
+
+        for _ in 0..8 {
+            sp = sp.sub(1);
+            *sp = 0x0000_0000; // R4-R11: initial values;
+        }
+
+        sp
+    }
+}
+
+pub mod prelude {
+    //! Re-exports of core scheduler primitives for convenient use in application code.
+    pub use crate::{CalleeSavedRegisters, Task, TaskState};
+}
