@@ -3,9 +3,6 @@
 
 //! Core task definitions for the runtime scheduler.
 
-/// Crate version taken from Cargo metadata at compile time.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// Execution state for a scheduled task.
 pub enum TaskState {
     /// The task is eligible to run when selected by the scheduler.
@@ -48,6 +45,9 @@ pub struct CalleeSavedRegisters {
 /// real context switching is added, the layout implied by `sp` and
 /// `callee_saved_regs` should be documented alongside the save/restore code.
 pub struct Task {
+    /// Stack pointer captured for the next restore of this task.
+    /// Stack pointer should be always placed in the first field.
+    pub sp: u32,
     /// Scheduler-assigned task identifier.
     pub id: u32,
     /// Human-readable task name for logs and diagnostics.
@@ -56,8 +56,6 @@ pub struct Task {
     pub priority: u8,
     /// Current lifecycle state used by the scheduler.
     pub state: TaskState,
-    /// Stack pointer captured for the next restore of this task.
-    pub sp: u32,
     /// Software view of the callee-saved register set for this task.
     pub callee_saved_regs: CalleeSavedRegisters,
 }
@@ -65,7 +63,7 @@ pub struct Task {
 pub unsafe fn forkyi(
     mut sp: *mut u32,
     entry: extern "C" fn(*mut core::ffi::c_void) -> !,
-    arg: *mut core::ffi::c_void
+    arg: *mut core::ffi::c_void,
 ) -> *mut u32 {
     // Full descending stack, sp should point to the last
     // used (lowest) address of the stack frame.

@@ -1,7 +1,12 @@
 #![no_std]
 
+/// Crate version taken from Cargo metadata at compile time.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod sched;
 pub mod task;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use task::{CalleeSavedRegisters, Task, TaskState, forkyi};
+
+pub use sched::init_current;
