@@ -42,12 +42,17 @@ pub struct CalleeSavedRegisters {
 /// Scheduler-visible task control block.
 ///
 /// `sp` points at the saved stack frame used when restoring the task. When
-/// real context switching is added, the layout implied by `sp` and
+/// `exc_return` records whether that saved frame belongs to MSP or PSP, and
+/// real context switching is added, the layout implied by `sp`,
+/// `exc_return`, and
 /// `callee_saved_regs` should be documented alongside the save/restore code.
 pub struct Task {
     /// Stack pointer captured for the next restore of this task.
     /// Stack pointer should be always placed in the first field.
     pub sp: u32,
+    /// Saved EXC_RETURN value used to restore the correct stack pointer.
+    /// exc_return should be always placed in the second field.
+    pub exc_return: u32,
     /// Scheduler-assigned task identifier.
     pub id: u32,
     /// Human-readable task name for logs and diagnostics.

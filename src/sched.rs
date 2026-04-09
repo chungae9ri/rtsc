@@ -23,8 +23,7 @@ global_asm!(
     ".global PendSV",
     ".type PendSV,%function",
     "PendSV:",
-    "push {{lr}}", // Preserve EXC_RETURN across function calls.
-    "tst lr, #4",  // Was the interrupted thread using PSP or MSP
+    "tst lr, #4", // Was the interrupted thread using PSP or MSP
     "ite eq",
     "mrseq r0, msp",         // Thread used MSP.
     "mrsne r0, psp",         // Thread used PSP.
@@ -32,13 +31,17 @@ global_asm!(
     "ldr r1, =current",      // R1 = &current
     "ldr r2, [r1]",          // R2 = current task pointer
     "str r0, [r2]",          // Save updated stack pointer into the task control block.
+    "str lr, [r2, #4]",      // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
     "bl schedule",           // Pick the next task and update current.
     "ldr r1, =current",      // R1 = &current
     "ldr r2, [r1]",          // R2 = next task pointer
     "ldr r0, [r2]",          // R0 = next task's saved SP
+    "ldr lr, [r2, #4]",      // LR = next task's saved EXC_RETURN
     "ldmia r0!, {{r4-r11}}", // Restore callee-saved registers for the selected task.
-    "msr psp, r0",
-    "pop {{lr}}", // Restore EXC_RETURN and return from exception to the next task.
+    "tst lr, #4",            // Does the next task return using MSP or PSP?
+    "ite eq",
+    "msreq msp, r0", // Restore MSP-backed context.
+    "msrne psp, r0", // Restore PSP-backed context.
     "bx lr",
 );
 
