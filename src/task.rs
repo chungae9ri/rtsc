@@ -4,6 +4,7 @@
 //! Core task definitions for the runtime scheduler.
 
 /// Execution state for a scheduled task.
+#[repr(C)]
 pub enum TaskState {
     /// The task is eligible to run when selected by the scheduler.
     Ready,
@@ -20,6 +21,7 @@ pub enum TaskState {
 /// These are the callee-saved general-purpose registers under the ARM ABI.
 /// A PendSV context switch routine typically stores and restores this set
 /// around task transitions.
+#[repr(C)]
 pub struct CalleeSavedRegisters {
     /// Saved value of register r4.
     pub r4: u32,
@@ -46,6 +48,7 @@ pub struct CalleeSavedRegisters {
 /// real context switching is added, the layout implied by `sp`,
 /// `exc_return`, and
 /// `callee_saved_regs` should be documented alongside the save/restore code.
+#[repr(C)]
 pub struct Task {
     /// Stack pointer captured for the next restore of this task.
     /// Stack pointer should be always placed in the first field.
