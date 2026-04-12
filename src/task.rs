@@ -73,35 +73,63 @@ pub struct Task {
 }
 
 pub unsafe fn forkyi(
+    task: *mut Task,
     mut sp: *mut u32,
     entry: extern "C" fn(*mut core::ffi::c_void) -> !,
     arg: *mut core::ffi::c_void,
-) -> *mut u32 {
-    // Full descending stack, sp should point to the last
-    // used (lowest) address of the stack frame.
+    id: u32,
+    name: &'static str,
+    priority: u8,
+    state: TaskState,
+) {
+    // Build the initial stack so that, after PendSV restores r4-r11 and sets
+    // PSP, exception return consumes a standard hardware frame:
+    // r0, r1, r2, r3, r12, lr, pc, xpsr.
     unsafe {
+        // Exception return requires an 8-byte aligned stack.
+        sp = ((sp as usize) & !0x7) as *mut u32;
+
+        sp = sp.sub(1);
+        *sp = 0x0100_0000; // xPSR: Thumb state
+
+        sp = sp.sub(1);
+        *sp = entry as usize as u32; // PC: task entry point
+
+        sp = sp.sub(1);
+        *sp = 0xFFFF_FFFD; // LR: return to Thread mode using PSP
+
+        sp = sp.sub(1);
+        *sp = 0x0000_0000; // R12
+
+        for _ in 0..3 {
+            sp = sp.sub(1);
+            *sp = 0x0000_0000; // R3, R2, R1
+        }
+
         sp = sp.sub(1);
         *sp = arg as u32; // R0: argument to the task entry function
 
-        for _ in 0..4 {
-            sp = sp.sub(1);
-            *sp = 0x0000_0000; // R1-R3, R12: initial values (not used)
-        }
-
-        sp = sp.sub(1);
-        *sp = 0xFFFF_FFFD; // LR: EXC_RETURN value for returning to Thread mode with PSP
-
-        sp = sp.sub(1);
-        *sp = entry as usize as u32; // PC: entry point of the task
-
-        sp = sp.sub(1);
-        *sp = 0x0100_0000; // xPSR: Thumb
-
         for _ in 0..8 {
             sp = sp.sub(1);
-            *sp = 0x0000_0000; // R4-R11: initial values;
+            *sp = 0x0000_0000; // R4-R11: initial values
         }
-
-        sp
+        *task = Task {
+            sp: sp as u32,
+            exc_return: 0xFFFF_FFFD,
+            id,
+            name,
+            priority,
+            state,
+            callee_saved_regs: CalleeSavedRegisters {
+                r4: 0,
+                r5: 0,
+                r6: 0,
+                r7: 0,
+                r8: 0,
+                r9: 0,
+                r10: 0,
+                r11: 0,
+            },
+        };
     }
 }
