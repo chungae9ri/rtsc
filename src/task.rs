@@ -41,6 +41,10 @@ pub struct CalleeSavedRegisters {
     pub r11: u32,
 }
 
+/// 8-byte aligned stack storage for Cortex-M thread contexts.
+#[repr(align(8))]
+pub struct AlignedStack<const N: usize>(pub [u32; N]);
+
 /// Scheduler-visible task control block.
 ///
 /// `sp` points at the saved stack frame used when restoring the task. When
