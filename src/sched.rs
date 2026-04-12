@@ -4,6 +4,7 @@
 use core::arch::global_asm;
 use core::ptr;
 
+use core::arch::asm;
 use cortex_m::peripheral::SCB;
 use cortex_m_rt::exception;
 
@@ -13,10 +14,45 @@ use crate::task::Task;
 static mut TICK_COUNT: u32 = 0;
 #[unsafe(no_mangle)]
 pub static mut current: *mut Task = ptr::null_mut();
+#[unsafe(no_mangle)]
+static mut START_TASK_PTR: *mut Task = ptr::null_mut();
 
 pub unsafe fn init_current(task: *mut Task) {
     unsafe { current = task };
 }
+
+/// Start the first scheduled task by restoring its prepared stack frame.
+///
+/// This does not return. The task must already have been initialized with the
+/// same synthetic frame layout produced by `forkyi`. The actual exception
+/// return happens in `SVCall`, because `EXC_RETURN` is only valid from handler
+/// mode.
+pub unsafe fn start_first_task(task: *mut Task) -> ! {
+    unsafe {
+        START_TASK_PTR = task;
+        asm!("svc 0", options(noreturn));
+    }
+}
+
+global_asm!(
+    ".section .text.SVCall,\"ax\",%progbits",
+    ".global SVCall",
+    ".type SVCall,%function",
+    "SVCall:",
+    "ldr r0, =START_TASK_PTR",
+    "ldr r0, [r0]",          // r0 = task
+    "ldr r3, =current",
+    "str r0, [r3]",          // current = task
+    "ldr r1, [r0]",          // r1 = task->sp
+    "ldr lr, [r0, #4]",      // lr = task->exc_return
+    "ldmia r1!, {{r4-r11}}", // restore callee-saved registers
+    "tst lr, #4",
+    "ite eq",
+    "msreq msp, r1",
+    "msrne psp, r1",
+    "bx lr",                 // exception return into the task entry frame
+    ".size SVCall, .-SVCall",
+);
 
 global_asm!(
     ".section .text.PendSV,\"ax\",%progbits",
