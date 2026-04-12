@@ -34,6 +34,16 @@ pub unsafe fn start_first_task(task: *mut Task) -> ! {
     }
 }
 
+static mut MAIN_THREAD_PTR: *mut Task = ptr::null_mut();
+static mut DUMMY_THREAD_PTR: *mut Task = ptr::null_mut();
+
+pub unsafe fn init_rq(main: *mut Task, dummy: *mut Task) {
+    unsafe {
+        MAIN_THREAD_PTR = main;
+        DUMMY_THREAD_PTR = dummy;
+    }
+}
+
 global_asm!(
     ".section .text.SVCall,\"ax\",%progbits",
     ".global SVCall",
@@ -82,7 +92,15 @@ global_asm!(
 );
 
 #[unsafe(no_mangle)]
-extern "C" fn schedule() {}
+extern "C" fn schedule() {
+   unsafe {
+       if TICK_COUNT % 2 == 0 {
+           current = MAIN_THREAD_PTR;
+       } else {
+           current = DUMMY_THREAD_PTR;
+       }
+   }
+}
 
 /// SysTick handler used for scheduler tick processing.
 ///
