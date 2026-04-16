@@ -44,6 +44,8 @@ pub unsafe fn init_rq(main: *mut Task, dummy: *mut Task) {
     }
 }
 
+// Switch to the first task which was set up by `forkyi`.
+// This is typically called at the end of `main`.
 global_asm!(
     ".section .text.SVCall,\"ax\",%progbits",
     ".global SVCall",
@@ -64,6 +66,11 @@ global_asm!(
     ".size SVCall, .-SVCall",
 );
 
+// PendSV handler used for context switching between tasks.
+// The actual context switch happens in the assembly code, but the scheduler is
+// called from here to select the next task to run and update `current`.
+// Tasks are expected to have their stack frames (PSP) prepared by `forkyi` so that the
+// assembly code can save and restore them without needing to understand the layout.
 global_asm!(
     ".section .text.PendSV,\"ax\",%progbits",
     ".global PendSV",
@@ -113,5 +120,3 @@ fn SysTick() {
     }
     SCB::set_pendsv();
 }
-
-pub unsafe fn switch_ctx(_cur: *mut Task, _next: *const Task) {}
