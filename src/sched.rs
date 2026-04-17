@@ -2,20 +2,38 @@
 // Copyright (c) 2026 kwangdo.yi
 
 use core::arch::global_asm;
+use core::cell::UnsafeCell;
+use core::mem::offset_of;
 use core::ptr;
 
 use core::arch::asm;
 use cortex_m::peripheral::SCB;
 use cortex_m_rt::exception;
 
-use crate::task::Task;
+use crate::rbtree::{RBTree, sched_entity};
+use crate::task::{Task, TaskState};
 //use rtt_target::rprintln;
 
 static mut TICK_COUNT: u32 = 0;
+static RUN_QUEUE: RunQueue = RunQueue::new();
 #[unsafe(no_mangle)]
 pub static mut current: *mut Task = ptr::null_mut();
 #[unsafe(no_mangle)]
 static mut START_TASK_PTR: *mut Task = ptr::null_mut();
+
+struct RunQueue(UnsafeCell<RBTree>);
+
+impl RunQueue {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(RBTree::new()))
+    }
+
+    fn get(&self) -> *mut RBTree {
+        self.0.get()
+    }
+}
+
+unsafe impl Sync for RunQueue {}
 
 pub unsafe fn init_current(task: *mut Task) {
     unsafe { current = task };
@@ -29,18 +47,37 @@ pub unsafe fn init_current(task: *mut Task) {
 /// mode.
 pub unsafe fn start_first_task(task: *mut Task) -> ! {
     unsafe {
+        (*RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*task).sched_entity));
+        (*task).state = TaskState::Running;
         START_TASK_PTR = task;
         asm!("svc 0", options(noreturn));
     }
 }
 
-static mut MAIN_THREAD_PTR: *mut Task = ptr::null_mut();
-static mut DUMMY_THREAD_PTR: *mut Task = ptr::null_mut();
-
-pub unsafe fn init_rq(main: *mut Task, dummy: *mut Task) {
+/// Reset the scheduler run queue to an empty state.
+pub unsafe fn init_rq() {
     unsafe {
-        MAIN_THREAD_PTR = main;
-        DUMMY_THREAD_PTR = dummy;
+        *RUN_QUEUE.get() = RBTree::new();
+    }
+}
+
+/// Enqueue a task into the scheduler run queue.
+///
+/// The task's `sched_entity.time` field is used as the red-black tree key.
+pub unsafe fn enqueue_task(task: *mut Task) {
+    unsafe {
+        (*task).state = TaskState::Ready;
+        (*task).sched_entity.reset_links();
+        (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*task).sched_entity));
+    }
+}
+
+/// Remove a task from the scheduler run queue if it is currently queued.
+pub unsafe fn dequeue_task(task: *mut Task) {
+    unsafe {
+        if (*task).state == TaskState::Ready {
+            (*RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*task).sched_entity));
+        }
     }
 }
 
@@ -52,7 +89,7 @@ global_asm!(
     ".type SVCall,%function",
     "SVCall:",
     "ldr r0, =START_TASK_PTR",
-    "ldr r0, [r0]",          // r0 = task
+    "ldr r0, [r0]", // r0 = task
     "ldr r3, =current",
     "str r0, [r3]",          // current = task
     "ldr r1, [r0]",          // r1 = task->sp
@@ -62,7 +99,7 @@ global_asm!(
     "ite eq",
     "msreq msp, r1",
     "msrne psp, r1",
-    "bx lr",                 // exception return into the task entry frame
+    "bx lr", // exception return into the task entry frame
     ".size SVCall, .-SVCall",
 );
 
@@ -100,13 +137,19 @@ global_asm!(
 
 #[unsafe(no_mangle)]
 extern "C" fn schedule() {
-   unsafe {
-       if TICK_COUNT % 2 == 0 {
-           current = MAIN_THREAD_PTR;
-       } else {
-           current = DUMMY_THREAD_PTR;
-       }
-   }
+    unsafe {
+        if !current.is_null() && (*current).state == TaskState::Running {
+            (*current).sched_entity.time += 1;
+            (*current).state = TaskState::Ready;
+            (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*current).sched_entity));
+        }
+
+        if let Some(next_entity) = (*RUN_QUEUE.get()).pop_first() {
+            let next_task = task_from_sched_entity(next_entity as *mut sched_entity);
+            (*next_task).state = TaskState::Running;
+            current = next_task;
+        }
+    }
 }
 
 /// SysTick handler used for scheduler tick processing.
@@ -119,4 +162,12 @@ fn SysTick() {
         TICK_COUNT += 1;
     }
     SCB::set_pendsv();
+}
+
+unsafe fn task_from_sched_entity(entity: *mut sched_entity) -> *mut Task {
+    unsafe {
+        (entity as *mut u8)
+            .sub(offset_of!(Task, sched_entity))
+            .cast::<Task>()
+    }
 }

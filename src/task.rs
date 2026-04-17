@@ -3,8 +3,12 @@
 
 //! Core task definitions for the runtime scheduler.
 
+use crate::rbtree::sched_entity;
+use crate::sched::enqueue_task;
+
 /// Execution state for a scheduled task.
 #[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
     /// The task is eligible to run when selected by the scheduler.
     Ready,
@@ -68,6 +72,8 @@ pub struct Task {
     pub priority: u8,
     /// Current lifecycle state used by the scheduler.
     pub state: TaskState,
+    /// Scheduler entity used for run-queue ordering.
+    pub sched_entity: sched_entity,
     /// Software view of the callee-saved register set for this task.
     pub callee_saved_regs: CalleeSavedRegisters,
 }
@@ -80,7 +86,6 @@ pub unsafe fn forkyi(
     id: u32,
     name: &'static str,
     priority: u8,
-    state: TaskState,
 ) {
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
     // PSP, exception return consumes a standard hardware frame:
@@ -119,7 +124,8 @@ pub unsafe fn forkyi(
             id,
             name,
             priority,
-            state,
+            state: TaskState::Ready,
+            sched_entity: sched_entity::new(0),
             callee_saved_regs: CalleeSavedRegisters {
                 r4: 0,
                 r5: 0,
@@ -131,5 +137,6 @@ pub unsafe fn forkyi(
                 r11: 0,
             },
         };
+        enqueue_task(task);
     }
 }
