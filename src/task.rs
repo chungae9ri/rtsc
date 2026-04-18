@@ -3,8 +3,7 @@
 
 //! Core task definitions for the runtime scheduler.
 
-use crate::rbtree::sched_entity;
-use crate::sched::enqueue_task;
+use crate::sched::{enqueue_task, sched_entity};
 
 /// Execution state for a scheduled task.
 #[repr(C)]

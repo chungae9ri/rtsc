@@ -10,4 +10,4 @@ pub mod task;
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use task::{AlignedStack, CalleeSavedRegisters, Task, TaskState, forkyi};
 
-pub use sched::{dequeue_task, enqueue_task, init_current, init_rq, start_first_task};
+pub use sched::{dequeue_task, enqueue_task, init_current, init_rq, sched_entity, spawn_main_task};

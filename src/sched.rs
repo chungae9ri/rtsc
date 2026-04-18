@@ -10,7 +10,7 @@ use core::arch::asm;
 use cortex_m::peripheral::SCB;
 use cortex_m_rt::exception;
 
-use crate::rbtree::{RBTree, sched_entity};
+use crate::rbtree::{RBTree, rb_node};
 use crate::task::{Task, TaskState};
 //use rtt_target::rprintln;
 
@@ -35,17 +35,50 @@ impl RunQueue {
 
 unsafe impl Sync for RunQueue {}
 
+/// Scheduler entity used as the tree node and ordering key.
+///
+/// `vrun_time` is the primary key. When two entities have the same
+/// `vrun_time`, their addresses are used as a stable tie-breaker so insertion
+/// order remains deterministic and the tree keeps a strict total ordering.
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct sched_entity {
+    /// Scheduler virtual runtime metric used as the red-black tree key.
+    pub vrun_time: u64,
+    pub(crate) rb_node: rb_node,
+}
+
+impl sched_entity {
+    /// Create a detached scheduler entity that can be inserted into a tree.
+    pub const fn new(vrun_time: u64) -> Self {
+        Self {
+            vrun_time,
+            rb_node: rb_node::new(),
+        }
+    }
+
+    /// Reset linkage so the entity can be reused or inserted into another tree.
+    pub fn reset_links(&mut self) {
+        self.rb_node.reset_links();
+    }
+
+    /// Return `true` if the entity is currently linked under another node.
+    pub fn is_linked(&self) -> bool {
+        self.rb_node.is_linked()
+    }
+}
+
 pub unsafe fn init_current(task: *mut Task) {
     unsafe { current = task };
 }
 
-/// Start the first scheduled task by restoring its prepared stack frame.
+/// Spawn main task by restoring its prepared stack frame.
 ///
 /// This does not return. The task must already have been initialized with the
 /// same synthetic frame layout produced by `forkyi`. The actual exception
-/// return happens in `SVCall`, because `EXC_RETURN` is only valid from handler
-/// mode.
-pub unsafe fn start_first_task(task: *mut Task) -> ! {
+/// return happens in `SVCall`, because `EXC_RETURN` is only valid from
+/// handler mode.
+pub unsafe fn spawn_main_task(task: *mut Task) -> ! {
     unsafe {
         (*RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*task).sched_entity));
         (*task).state = TaskState::Running;
@@ -63,7 +96,7 @@ pub unsafe fn init_rq() {
 
 /// Enqueue a task into the scheduler run queue.
 ///
-/// The task's `sched_entity.time` field is used as the red-black tree key.
+/// The task's `sched_entity.vrun_time` field is used as the red-black tree key.
 pub unsafe fn enqueue_task(task: *mut Task) {
     unsafe {
         (*task).state = TaskState::Ready;
@@ -139,7 +172,7 @@ global_asm!(
 extern "C" fn schedule() {
     unsafe {
         if !current.is_null() && (*current).state == TaskState::Running {
-            (*current).sched_entity.time += 1;
+            (*current).sched_entity.vrun_time += 1;
             (*current).state = TaskState::Ready;
             (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*current).sched_entity));
         }
