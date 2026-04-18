@@ -45,14 +45,17 @@ unsafe impl Sync for RunQueue {}
 pub struct sched_entity {
     /// Scheduler virtual runtime metric used as the red-black tree key.
     pub vrun_time: u64,
+    /// Scheduling priority, where the exact ordering is defined by the scheduler.
+    pub priority: u8,
     pub(crate) rb_node: rb_node,
 }
 
 impl sched_entity {
     /// Create a detached scheduler entity that can be inserted into a tree.
-    pub const fn new(vrun_time: u64) -> Self {
+    pub const fn new(vrun_time: u64, priority: u8) -> Self {
         Self {
             vrun_time,
+            priority,
             rb_node: rb_node::new(),
         }
     }

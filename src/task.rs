@@ -67,8 +67,6 @@ pub struct Task {
     pub id: u32,
     /// Human-readable task name for logs and diagnostics.
     pub name: &'static str,
-    /// Scheduling priority, where the exact ordering is defined by the scheduler.
-    pub priority: u8,
     /// Current lifecycle state used by the scheduler.
     pub state: TaskState,
     /// Scheduler entity used for run-queue ordering.
@@ -122,9 +120,8 @@ pub unsafe fn forkyi(
             exc_return: 0xFFFF_FFFD,
             id,
             name,
-            priority,
             state: TaskState::Ready,
-            sched_entity: sched_entity::new(0),
+            sched_entity: sched_entity::new(0, priority),
             callee_saved_regs: CalleeSavedRegisters {
                 r4: 0,
                 r5: 0,
