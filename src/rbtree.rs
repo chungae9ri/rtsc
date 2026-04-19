@@ -50,7 +50,7 @@ impl rb_node {
     }
 }
 
-/// Red-black tree of `sched_entity` nodes ordered by `vrun_time`.
+/// Red-black tree of `sched_entity` nodes ordered by `vruntime`.
 #[derive(Debug)]
 pub struct RBTree {
     root: *mut rb_node,
@@ -238,7 +238,7 @@ impl RBTree {
         unsafe {
             let a_entity = Self::entity_of_const(a);
             let b_entity = Self::entity_of_const(b);
-            match (*a_entity).vrun_time.cmp(&(*b_entity).vrun_time) {
+            match (*a_entity).vruntime.cmp(&(*b_entity).vruntime) {
                 Ordering::Equal => (a_entity as usize).cmp(&(b_entity as usize)),
                 other => other,
             }
