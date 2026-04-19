@@ -21,15 +21,25 @@ pub static mut current: *mut Task = ptr::null_mut();
 #[unsafe(no_mangle)]
 static mut START_TASK_PTR: *mut Task = ptr::null_mut();
 
-struct RunQueue(UnsafeCell<RBTree>);
+struct RunQueue {
+    tree: UnsafeCell<RBTree>,
+    priority_sum: UnsafeCell<u64>,
+}
 
 impl RunQueue {
     const fn new() -> Self {
-        Self(UnsafeCell::new(RBTree::new()))
+        Self {
+            tree: UnsafeCell::new(RBTree::new()),
+            priority_sum: UnsafeCell::new(0),
+        }
     }
 
     fn get(&self) -> *mut RBTree {
-        self.0.get()
+        self.tree.get()
+    }
+
+    fn priority_sum(&self) -> *mut u64 {
+        self.priority_sum.get()
     }
 }
 
@@ -37,24 +47,26 @@ unsafe impl Sync for RunQueue {}
 
 /// Scheduler entity used as the tree node and ordering key.
 ///
-/// `vrun_time` is the primary key. When two entities have the same
-/// `vrun_time`, their addresses are used as a stable tie-breaker so insertion
+/// `vruntime` is the primary key. When two entities have the same
+/// `vruntime`, their addresses are used as a stable tie-breaker so insertion
 /// order remains deterministic and the tree keeps a strict total ordering.
 #[allow(non_camel_case_types)]
 #[repr(C)]
 pub struct sched_entity {
+    pub(crate) sched_tick_cnt: u32,
     /// Scheduler virtual runtime metric used as the red-black tree key.
-    pub vrun_time: u64,
+    pub(crate) vruntime: u64,
     /// Scheduling priority, where the exact ordering is defined by the scheduler.
-    pub priority: u8,
+    pub priority: u32,
     pub(crate) rb_node: rb_node,
 }
 
 impl sched_entity {
     /// Create a detached scheduler entity that can be inserted into a tree.
-    pub const fn new(vrun_time: u64, priority: u8) -> Self {
+    pub const fn new(priority: u32) -> Self {
         Self {
-            vrun_time,
+            sched_tick_cnt: 0,
+            vruntime: 0,
             priority,
             rb_node: rb_node::new(),
         }
@@ -94,17 +106,19 @@ pub unsafe fn spawn_main_task(task: *mut Task) -> ! {
 pub unsafe fn init_rq() {
     unsafe {
         *RUN_QUEUE.get() = RBTree::new();
+        *RUN_QUEUE.priority_sum() = 0;
     }
 }
 
 /// Enqueue a task into the scheduler run queue.
 ///
-/// The task's `sched_entity.vrun_time` field is used as the red-black tree key.
+/// The task's `sched_entity.vruntime` field is used as the red-black tree key.
 pub unsafe fn enqueue_task(task: *mut Task) {
     unsafe {
         (*task).state = TaskState::Ready;
         (*task).sched_entity.reset_links();
         (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*task).sched_entity));
+        *RUN_QUEUE.priority_sum() += u64::from((*task).sched_entity.priority);
     }
 }
 
@@ -113,6 +127,7 @@ pub unsafe fn dequeue_task(task: *mut Task) {
     unsafe {
         if (*task).state == TaskState::Ready {
             (*RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*task).sched_entity));
+            *RUN_QUEUE.priority_sum() -= u64::from((*task).sched_entity.priority);
         }
     }
 }
@@ -175,15 +190,34 @@ global_asm!(
 extern "C" fn schedule() {
     unsafe {
         if !current.is_null() && (*current).state == TaskState::Running {
-            (*current).sched_entity.vrun_time += 1;
-            (*current).state = TaskState::Ready;
-            (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*current).sched_entity));
-        }
+            debug_assert!(
+                !(*current).sched_entity.is_linked(),
+                "running task is still linked in RUN_QUEUE before scheduling"
+            );
+            (*current).sched_entity.sched_tick_cnt += 1;
+            let priority_sum = *RUN_QUEUE.priority_sum();
+            if priority_sum == 0 {
+                return;
+            }
+            let sched_tick_cnt = u64::from((*current).sched_entity.sched_tick_cnt);
+            let priority = u64::from((*current).sched_entity.priority);
 
-        if let Some(next_entity) = (*RUN_QUEUE.get()).pop_first() {
-            let next_task = task_from_sched_entity(next_entity as *mut sched_entity);
-            (*next_task).state = TaskState::Running;
-            current = next_task;
+            (*current).sched_entity.vruntime = sched_tick_cnt * priority / priority_sum;
+            if let Some(next_entity) = (*RUN_QUEUE.get()).pop_first() {
+                let next_task = task_from_sched_entity(next_entity as *mut sched_entity);
+                debug_assert!(
+                    current != next_task,
+                    "RUN_QUEUE.pop_first() returned the current running task"
+                );
+                if (*current).sched_entity.vruntime > (*next_task).sched_entity.vruntime {
+                    (*current).state = TaskState::Ready;
+                    (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*current).sched_entity));
+                    (*next_task).state = TaskState::Running;
+                    current = next_task;
+                } else {
+                    (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*next_task).sched_entity));
+                }
+            }
         }
     }
 }

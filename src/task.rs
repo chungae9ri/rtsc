@@ -82,7 +82,7 @@ pub unsafe fn forkyi(
     arg: *mut core::ffi::c_void,
     id: u32,
     name: &'static str,
-    priority: u8,
+    priority: u32,
 ) {
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
     // PSP, exception return consumes a standard hardware frame:
@@ -121,7 +121,7 @@ pub unsafe fn forkyi(
             id,
             name,
             state: TaskState::Ready,
-            sched_entity: sched_entity::new(0, priority),
+            sched_entity: sched_entity::new(priority),
             callee_saved_regs: CalleeSavedRegisters {
                 r4: 0,
                 r5: 0,
