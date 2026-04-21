@@ -5,9 +5,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod rbtree;
 pub mod sched;
-pub mod task;
+pub mod thread;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
-pub use task::{AlignedStack, CalleeSavedRegisters, Task, TaskState, forkyi};
+pub use thread::{AlignedStack, CalleeSavedRegisters, Thread, ThreadState, forkyi};
 
-pub use sched::{dequeue_task, enqueue_task, init_current, init_rq, sched_entity, spawn_main_task};
+pub use sched::{
+    dequeue_thread, enqueue_thread, init_current, init_rq, sched_entity, spawn_main_thread,
+};

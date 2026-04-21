@@ -5,7 +5,7 @@
 //!
 //! The tree stores scheduler-owned `rb_node` links directly inside each
 //! `sched_entity` and does not allocate. This fits scheduler code that manages
-//! task metadata in pre-allocated control blocks.
+//! thread metadata in pre-allocated control blocks.
 
 use crate::sched::sched_entity;
 use core::cmp::Ordering;

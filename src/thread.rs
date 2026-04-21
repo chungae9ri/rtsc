@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 kwangdo.yi
 
-//! Core task definitions for the runtime scheduler.
+//! Core thread definitions for the runtime scheduler.
 
-use crate::sched::{enqueue_task, sched_entity};
+use crate::sched::{enqueue_thread, sched_entity};
 
-/// Execution state for a scheduled task.
+/// Execution state for a scheduled thread.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TaskState {
-    /// The task is eligible to run when selected by the scheduler.
+pub enum ThreadState {
+    /// The thread is eligible to run when selected by the scheduler.
     Ready,
-    /// The task is currently executing on the CPU.
+    /// The thread is currently executing on the CPU.
     Running,
-    /// The task cannot run until an external event or resource becomes ready.
+    /// The thread cannot run until an external event or resource becomes ready.
     Blocked,
-    /// The task has been paused explicitly and will not be scheduled.
+    /// The thread has been paused explicitly and will not be scheduled.
     Suspended,
 }
 
@@ -23,7 +23,7 @@ pub enum TaskState {
 ///
 /// These are the callee-saved general-purpose registers under the ARM ABI.
 /// A PendSV context switch routine typically stores and restores this set
-/// around task transitions.
+/// around thread transitions.
 #[repr(C)]
 pub struct CalleeSavedRegisters {
     /// Saved value of register r4.
@@ -48,35 +48,35 @@ pub struct CalleeSavedRegisters {
 #[repr(align(8))]
 pub struct AlignedStack<const N: usize>(pub [u32; N]);
 
-/// Scheduler-visible task control block.
+/// Scheduler-visible thread control block.
 ///
-/// `sp` points at the saved stack frame used when restoring the task. When
+/// `sp` points at the saved stack frame used when restoring the thread. When
 /// `exc_return` records whether that saved frame belongs to MSP or PSP, and
 /// real context switching is added, the layout implied by `sp`,
 /// `exc_return`, and
 /// `callee_saved_regs` should be documented alongside the save/restore code.
 #[repr(C)]
-pub struct Task {
-    /// Stack pointer captured for the next restore of this task.
+pub struct Thread {
+    /// Stack pointer captured for the next restore of this thread.
     /// Stack pointer should be always placed in the first field.
     pub sp: u32,
     /// Saved EXC_RETURN value used to restore the correct stack pointer.
     /// exc_return should be always placed in the second field.
     pub exc_return: u32,
-    /// Scheduler-assigned task identifier.
+    /// Scheduler-assigned thread identifier.
     pub id: u32,
-    /// Human-readable task name for logs and diagnostics.
+    /// Human-readable thread name for logs and diagnostics.
     pub name: &'static str,
     /// Current lifecycle state used by the scheduler.
-    pub state: TaskState,
+    pub state: ThreadState,
     /// Scheduler entity used for run-queue ordering.
     pub sched_entity: sched_entity,
-    /// Software view of the callee-saved register set for this task.
+    /// Software view of the callee-saved register set for this thread.
     pub callee_saved_regs: CalleeSavedRegisters,
 }
 
 pub unsafe fn forkyi(
-    task: *mut Task,
+    thread: *mut Thread,
     mut sp: *mut u32,
     entry: extern "C" fn(*mut core::ffi::c_void) -> !,
     arg: *mut core::ffi::c_void,
@@ -95,7 +95,7 @@ pub unsafe fn forkyi(
         *sp = 0x0100_0000; // xPSR: Thumb state
 
         sp = sp.sub(1);
-        *sp = entry as usize as u32; // PC: task entry point
+        *sp = entry as usize as u32; // PC: thread entry point
 
         sp = sp.sub(1);
         *sp = 0xFFFF_FFFD; // LR: return to Thread mode using PSP
@@ -109,18 +109,18 @@ pub unsafe fn forkyi(
         }
 
         sp = sp.sub(1);
-        *sp = arg as u32; // R0: argument to the task entry function
+        *sp = arg as u32; // R0: argument to the thread entry function
 
         for _ in 0..8 {
             sp = sp.sub(1);
             *sp = 0x0000_0000; // R4-R11: initial values
         }
-        *task = Task {
+        *thread = Thread {
             sp: sp as u32,
             exc_return: 0xFFFF_FFFD,
             id,
             name,
-            state: TaskState::Ready,
+            state: ThreadState::Ready,
             sched_entity: sched_entity::new(priority),
             callee_saved_regs: CalleeSavedRegisters {
                 r4: 0,
@@ -133,6 +133,6 @@ pub unsafe fn forkyi(
                 r11: 0,
             },
         };
-        enqueue_task(task);
+        enqueue_thread(thread);
     }
 }
