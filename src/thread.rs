@@ -5,6 +5,12 @@
 
 use crate::sched::{enqueue_thread, sched_entity};
 
+/// Global counter for assigning unique thread IDs. Accessed only
+/// from the main thread during thread creation, so no synchronization
+/// is needed. When dynamic thread creation is added, this should be
+/// protected by a mutex or replaced with an atomic counter.
+static mut NEXT_THREAD_ID: u32 = 0;
+
 /// Execution state for a scheduled thread.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,7 +86,6 @@ pub unsafe fn forkyi(
     mut sp: *mut u32,
     entry: extern "C" fn(*mut core::ffi::c_void) -> !,
     arg: *mut core::ffi::c_void,
-    id: u32,
     name: &'static str,
     priority: u32,
 ) {
@@ -115,6 +120,8 @@ pub unsafe fn forkyi(
             sp = sp.sub(1);
             *sp = 0x0000_0000; // R4-R11: initial values
         }
+        let id = NEXT_THREAD_ID;
+        NEXT_THREAD_ID = NEXT_THREAD_ID.wrapping_add(1);
         *thread = Thread {
             sp: sp as u32,
             exc_return: 0xFFFF_FFFD,
