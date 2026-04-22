@@ -81,10 +81,69 @@ impl sched_entity {
     pub fn is_linked(&self) -> bool {
         self.rb_node.is_linked()
     }
+
+    /// Return the scheduler virtual runtime used for run-queue ordering.
+    pub fn vruntime(&self) -> u64 {
+        self.vruntime
+    }
+
+    /// Return the scheduler tick count accumulated for this entity.
+    pub fn sched_tick_cnt(&self) -> u32 {
+        self.sched_tick_cnt
+    }
 }
 
 pub unsafe fn init_current(thread: *mut Thread) {
     unsafe { current = thread };
+}
+
+/// Traverse the scheduler-visible threads, including the running thread.
+///
+/// Pass `None` to get the current running thread when one exists; otherwise
+/// this returns the first queued thread. Pass the previously returned thread to
+/// get the next entry. After the running thread, traversal continues through
+/// the run queue in ascending vruntime order. Returns `None` after the last
+/// queued thread.
+///
+/// # Safety
+///
+/// The caller must ensure that any provided thread pointer still refers to a
+/// valid thread control block and that the run queue is not concurrently
+/// mutated in a way that invalidates the traversal step.
+pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thread> {
+    unsafe {
+        let tree = &*RUN_QUEUE.get();
+        match cursor {
+            None => {
+                if !current.is_null() {
+                    Some(current)
+                } else {
+                    let first = tree.first();
+                    if first.is_null() {
+                        None
+                    } else {
+                        Some(thread_from_sched_entity(first))
+                    }
+                }
+            }
+            Some(thread) if thread == current => {
+                let first = tree.first();
+                if first.is_null() {
+                    None
+                } else {
+                    Some(thread_from_sched_entity(first))
+                }
+            }
+            Some(thread) => {
+                let next = tree.next(ptr::addr_of!((*thread).sched_entity).cast_mut());
+                if next.is_null() {
+                    None
+                } else {
+                    Some(thread_from_sched_entity(next))
+                }
+            }
+        }
+    }
 }
 
 /// Spawn main thread by restoring its prepared stack frame.
