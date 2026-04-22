@@ -12,4 +12,5 @@ pub use thread::{AlignedStack, CalleeSavedRegisters, Thread, ThreadState, forkyi
 
 pub use sched::{
     dequeue_thread, enqueue_thread, init_current, init_rq, sched_entity, spawn_main_thread,
+    traverse_run_queue,
 };

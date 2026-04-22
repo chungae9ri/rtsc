@@ -91,6 +91,28 @@ impl RBTree {
         Self::entity_of(Self::maximum(self.root))
     }
 
+    pub fn next(&self, entity: *mut sched_entity) -> *mut sched_entity {
+        if entity.is_null() {
+            return ptr::null_mut();
+        }
+
+        unsafe {
+            let mut node = Self::node_of(entity);
+
+            if !(*node).right.is_null() {
+                return Self::entity_of(Self::minimum((*node).right));
+            }
+
+            let mut parent = (*node).parent;
+            while !parent.is_null() && node == (*parent).right {
+                node = parent;
+                parent = (*parent).parent;
+            }
+
+            Self::entity_of(parent)
+        }
+    }
+
     /// Insert a detached scheduler entity into the tree.
     ///
     /// # Safety
