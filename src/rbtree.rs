@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 kwangdo.yi
 
-//! Intrusive red-black tree keyed by scheduler entity virtual runtime.
+//! Generic intrusive red-black tree.
 //!
-//! The tree stores scheduler-owned `rb_node` links directly inside each
-//! `sched_entity` and does not allocate. This fits scheduler code that manages
-//! thread metadata in pre-allocated control blocks.
+//! The tree stores links directly inside caller-owned entities and does not
+//! allocate. Each entity type supplies accessors for its embedded `RbNode` and
+//! its own ordering key.
 
-use crate::sched::sched_entity;
 use core::cmp::Ordering;
-use core::mem::offset_of;
+use core::marker::PhantomData;
 use core::ptr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,17 +17,16 @@ pub(crate) enum Color {
     Black,
 }
 
-/// Intrusive red-black tree links embedded inside a `sched_entity`.
-#[allow(non_camel_case_types)]
+/// Intrusive red-black tree links embedded inside an owning entity.
 #[repr(C)]
-pub struct rb_node {
-    parent: *mut rb_node,
-    left: *mut rb_node,
-    right: *mut rb_node,
+pub struct RbNode {
+    parent: *mut RbNode,
+    left: *mut RbNode,
+    right: *mut RbNode,
     color: Color,
 }
 
-impl rb_node {
+impl RbNode {
     pub const fn new() -> Self {
         Self {
             parent: ptr::null_mut(),
@@ -50,57 +48,85 @@ impl rb_node {
     }
 }
 
-/// Red-black tree of `sched_entity` nodes ordered by `vruntime`.
-#[derive(Debug)]
-pub struct RBTree {
-    root: *mut rb_node,
-    len: usize,
-}
-
-impl Default for RBTree {
+impl Default for RbNode {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RBTree {
+/// Entity contract for using `RBTree`.
+///
+/// # Safety
+///
+/// Implementors must return the address of the embedded `RbNode` that belongs
+/// to the provided entity, and must recover the original entity pointer from a
+/// node pointer produced by that accessor.
+pub(crate) unsafe trait RBTreeNode: Sized {
+    fn node(entity: *mut Self) -> *mut RbNode;
+    fn entity_of(node: *mut RbNode) -> *mut Self;
+    fn entity_of_const(node: *const RbNode) -> *const Self;
+
+    /// Compare two entities. Equal keys must be resolved with a strict
+    /// tie-breaker, usually the entity address, so tree ordering is total.
+    unsafe fn cmp(a: *const Self, b: *const Self) -> Ordering;
+}
+
+/// Intrusive red-black tree over caller-owned entity type `T`.
+pub(crate) struct RBTree<T: RBTreeNode> {
+    root: *mut RbNode,
+    len: usize,
+    _entity: PhantomData<T>,
+}
+
+impl<T: RBTreeNode> Default for RBTree<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: RBTreeNode> RBTree<T> {
     pub const fn new() -> Self {
         Self {
             root: ptr::null_mut(),
             len: 0,
+            _entity: PhantomData,
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.root.is_null()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    pub fn root(&self) -> *mut sched_entity {
-        Self::entity_of(self.root)
+    #[allow(dead_code)]
+    pub fn root(&self) -> *mut T {
+        T::entity_of(self.root)
     }
 
-    pub fn first(&self) -> *mut sched_entity {
-        Self::entity_of(Self::minimum(self.root))
+    pub fn first(&self) -> *mut T {
+        T::entity_of(Self::minimum(self.root))
     }
 
-    pub fn last(&self) -> *mut sched_entity {
-        Self::entity_of(Self::maximum(self.root))
+    #[allow(dead_code)]
+    pub fn last(&self) -> *mut T {
+        T::entity_of(Self::maximum(self.root))
     }
 
-    pub fn next(&self, entity: *mut sched_entity) -> *mut sched_entity {
+    pub fn next(&self, entity: *mut T) -> *mut T {
         if entity.is_null() {
             return ptr::null_mut();
         }
 
         unsafe {
-            let mut node = Self::node_of(entity);
+            let mut node = T::node(entity);
 
             if !(*node).right.is_null() {
-                return Self::entity_of(Self::minimum((*node).right));
+                return T::entity_of(Self::minimum((*node).right));
             }
 
             let mut parent = (*node).parent;
@@ -109,21 +135,21 @@ impl RBTree {
                 parent = (*parent).parent;
             }
 
-            Self::entity_of(parent)
+            T::entity_of(parent)
         }
     }
 
-    /// Insert a detached scheduler entity into the tree.
+    /// Insert a detached entity into the tree.
     ///
     /// # Safety
     ///
     /// The caller must ensure `entity` is valid for mutation and is not
     /// simultaneously linked into another tree.
-    pub unsafe fn insert(&mut self, entity: *mut sched_entity) {
+    pub unsafe fn insert(&mut self, entity: *mut T) {
         debug_assert!(!entity.is_null());
 
         unsafe {
-            let node = Self::node_of(entity);
+            let node = T::node(entity);
             (*node).reset_links();
 
             let mut parent = ptr::null_mut();
@@ -131,17 +157,17 @@ impl RBTree {
 
             while !current.is_null() {
                 parent = current;
-                match Self::cmp(node, current) {
+                match Self::cmp_nodes(node, current) {
                     Ordering::Less => current = (*current).left,
                     Ordering::Greater => current = (*current).right,
-                    Ordering::Equal => unreachable!("address tie-break keeps ordering strict"),
+                    Ordering::Equal => unreachable!("entity ordering must be strict"),
                 }
             }
 
             (*node).parent = parent;
             if parent.is_null() {
                 self.root = node;
-            } else if Self::cmp(node, parent) == Ordering::Less {
+            } else if Self::cmp_nodes(node, parent) == Ordering::Less {
                 (*parent).left = node;
             } else {
                 (*parent).right = node;
@@ -154,18 +180,16 @@ impl RBTree {
 
     /// Remove an entity from the tree.
     ///
-    /// Returns the removed pointer, or null if `entity` was null.
-    ///
     /// # Safety
     ///
     /// The caller must ensure `entity` currently belongs to this tree.
-    pub unsafe fn remove(&mut self, entity: *mut sched_entity) -> *mut sched_entity {
+    pub unsafe fn remove(&mut self, entity: *mut T) -> *mut T {
         if entity.is_null() {
             return ptr::null_mut();
         }
 
         unsafe {
-            let node = Self::node_of(entity);
+            let node = T::node(entity);
             let mut y = node;
             let mut y_original_color = (*y).color;
             let x;
@@ -213,12 +237,7 @@ impl RBTree {
     }
 
     /// Remove and return the left-most entity in the tree.
-    ///
-    /// # Safety
-    ///
-    /// Returned reference is valid only as long as the caller maintains the
-    /// lifetime of the underlying entity.
-    pub unsafe fn pop_first(&mut self) -> Option<&mut sched_entity> {
+    pub unsafe fn pop_first(&mut self) -> Option<&mut T> {
         let first = self.first();
         if first.is_null() {
             return None;
@@ -230,7 +249,7 @@ impl RBTree {
         }
     }
 
-    fn color_of(node: *mut rb_node) -> Color {
+    fn color_of(node: *mut RbNode) -> Color {
         if node.is_null() {
             Color::Black
         } else {
@@ -238,7 +257,7 @@ impl RBTree {
         }
     }
 
-    fn minimum(mut node: *mut rb_node) -> *mut rb_node {
+    fn minimum(mut node: *mut RbNode) -> *mut RbNode {
         unsafe {
             while !node.is_null() && !(*node).left.is_null() {
                 node = (*node).left;
@@ -247,7 +266,8 @@ impl RBTree {
         node
     }
 
-    fn maximum(mut node: *mut rb_node) -> *mut rb_node {
+    #[allow(dead_code)]
+    fn maximum(mut node: *mut RbNode) -> *mut RbNode {
         unsafe {
             while !node.is_null() && !(*node).right.is_null() {
                 node = (*node).right;
@@ -256,18 +276,11 @@ impl RBTree {
         node
     }
 
-    fn cmp(a: *const rb_node, b: *const rb_node) -> Ordering {
-        unsafe {
-            let a_entity = Self::entity_of_const(a);
-            let b_entity = Self::entity_of_const(b);
-            match (*a_entity).vruntime.cmp(&(*b_entity).vruntime) {
-                Ordering::Equal => (a_entity as usize).cmp(&(b_entity as usize)),
-                other => other,
-            }
-        }
+    fn cmp_nodes(a: *const RbNode, b: *const RbNode) -> Ordering {
+        unsafe { T::cmp(T::entity_of_const(a), T::entity_of_const(b)) }
     }
 
-    unsafe fn left_rotate(&mut self, x: *mut rb_node) {
+    unsafe fn left_rotate(&mut self, x: *mut RbNode) {
         unsafe {
             let y = (*x).right;
             debug_assert!(!y.is_null());
@@ -291,7 +304,7 @@ impl RBTree {
         }
     }
 
-    unsafe fn right_rotate(&mut self, y: *mut rb_node) {
+    unsafe fn right_rotate(&mut self, y: *mut RbNode) {
         unsafe {
             let x = (*y).left;
             debug_assert!(!x.is_null());
@@ -315,7 +328,7 @@ impl RBTree {
         }
     }
 
-    unsafe fn insert_fixup(&mut self, mut z: *mut rb_node) {
+    unsafe fn insert_fixup(&mut self, mut z: *mut RbNode) {
         unsafe {
             while Self::color_of((*z).parent) == Color::Red {
                 let parent = (*z).parent;
@@ -368,7 +381,7 @@ impl RBTree {
         }
     }
 
-    unsafe fn transplant(&mut self, u: *mut rb_node, v: *mut rb_node) {
+    unsafe fn transplant(&mut self, u: *mut RbNode, v: *mut RbNode) {
         unsafe {
             if (*u).parent.is_null() {
                 self.root = v;
@@ -384,7 +397,7 @@ impl RBTree {
         }
     }
 
-    unsafe fn remove_fixup(&mut self, mut x: *mut rb_node, mut parent: *mut rb_node) {
+    unsafe fn remove_fixup(&mut self, mut x: *mut RbNode, mut parent: *mut RbNode) {
         unsafe {
             while x != self.root && Self::color_of(x) == Color::Black {
                 if x == parent_left(parent) {
@@ -481,41 +494,9 @@ impl RBTree {
             }
         }
     }
-
-    fn node_of(entity: *mut sched_entity) -> *mut rb_node {
-        if entity.is_null() {
-            ptr::null_mut()
-        } else {
-            unsafe { ptr::addr_of_mut!((*entity).rb_node) }
-        }
-    }
-
-    fn entity_of(node: *mut rb_node) -> *mut sched_entity {
-        if node.is_null() {
-            ptr::null_mut()
-        } else {
-            unsafe {
-                (node as *mut u8)
-                    .sub(offset_of!(sched_entity, rb_node))
-                    .cast::<sched_entity>()
-            }
-        }
-    }
-
-    fn entity_of_const(node: *const rb_node) -> *const sched_entity {
-        if node.is_null() {
-            ptr::null()
-        } else {
-            unsafe {
-                (node as *const u8)
-                    .sub(offset_of!(sched_entity, rb_node))
-                    .cast::<sched_entity>()
-            }
-        }
-    }
 }
 
-fn parent_of(node: *mut rb_node) -> *mut rb_node {
+fn parent_of(node: *mut RbNode) -> *mut RbNode {
     if node.is_null() {
         ptr::null_mut()
     } else {
@@ -523,7 +504,7 @@ fn parent_of(node: *mut rb_node) -> *mut rb_node {
     }
 }
 
-fn left_of(node: *mut rb_node) -> *mut rb_node {
+fn left_of(node: *mut RbNode) -> *mut RbNode {
     if node.is_null() {
         ptr::null_mut()
     } else {
@@ -531,7 +512,7 @@ fn left_of(node: *mut rb_node) -> *mut rb_node {
     }
 }
 
-fn right_of(node: *mut rb_node) -> *mut rb_node {
+fn right_of(node: *mut RbNode) -> *mut RbNode {
     if node.is_null() {
         ptr::null_mut()
     } else {
@@ -539,10 +520,10 @@ fn right_of(node: *mut rb_node) -> *mut rb_node {
     }
 }
 
-fn parent_left(node: *mut rb_node) -> *mut rb_node {
+fn parent_left(node: *mut RbNode) -> *mut RbNode {
     left_of(node)
 }
 
-fn parent_right(node: *mut rb_node) -> *mut rb_node {
+fn parent_right(node: *mut RbNode) -> *mut RbNode {
     right_of(node)
 }
