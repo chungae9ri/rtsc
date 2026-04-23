@@ -3,7 +3,7 @@
 
 //! Core thread definitions for the runtime scheduler.
 
-use crate::sched::{enqueue_thread, sched_entity};
+use crate::sched::{SchedEntity, enqueue_thread};
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -76,7 +76,7 @@ pub struct Thread {
     /// Current lifecycle state used by the scheduler.
     pub state: ThreadState,
     /// Scheduler entity used for run-queue ordering.
-    pub sched_entity: sched_entity,
+    pub sched_entity: SchedEntity,
     /// Software view of the callee-saved register set for this thread.
     pub callee_saved_regs: CalleeSavedRegisters,
 }
@@ -128,7 +128,7 @@ pub unsafe fn forkyi(
             id,
             name,
             state: ThreadState::Ready,
-            sched_entity: sched_entity::new(priority),
+            sched_entity: SchedEntity::new(priority),
             callee_saved_regs: CalleeSavedRegisters {
                 r4: 0,
                 r5: 0,

@@ -10,7 +10,7 @@ use core::arch::asm;
 use cortex_m::peripheral::SCB;
 use cortex_m_rt::exception;
 
-use crate::rbtree::{RBTree, rb_node};
+use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{Thread, ThreadState};
 //use rtt_target::rprintln;
 
@@ -22,7 +22,7 @@ pub static mut current: *mut Thread = ptr::null_mut();
 static mut START_THREAD_PTR: *mut Thread = ptr::null_mut();
 
 struct RunQueue {
-    tree: UnsafeCell<RBTree>,
+    tree: UnsafeCell<RBTree<SchedEntity>>,
     priority_sum: UnsafeCell<u64>,
 }
 
@@ -34,7 +34,7 @@ impl RunQueue {
         }
     }
 
-    fn get(&self) -> *mut RBTree {
+    fn get(&self) -> *mut RBTree<SchedEntity> {
         self.tree.get()
     }
 
@@ -50,25 +50,24 @@ unsafe impl Sync for RunQueue {}
 /// `vruntime` is the primary key. When two entities have the same
 /// `vruntime`, their addresses are used as a stable tie-breaker so insertion
 /// order remains deterministic and the tree keeps a strict total ordering.
-#[allow(non_camel_case_types)]
 #[repr(C)]
-pub struct sched_entity {
+pub struct SchedEntity {
     pub(crate) sched_tick_cnt: u32,
     /// Scheduler virtual runtime metric used as the red-black tree key.
     pub(crate) vruntime: u64,
     /// Scheduling priority, where the exact ordering is defined by the scheduler.
     pub priority: u32,
-    pub(crate) rb_node: rb_node,
+    pub(crate) rb_node: RbNode,
 }
 
-impl sched_entity {
+impl SchedEntity {
     /// Create a detached scheduler entity that can be inserted into a tree.
     pub const fn new(priority: u32) -> Self {
         Self {
             sched_tick_cnt: 0,
             vruntime: 0,
             priority,
-            rb_node: rb_node::new(),
+            rb_node: RbNode::new(),
         }
     }
 
@@ -90,6 +89,49 @@ impl sched_entity {
     /// Return the scheduler tick count accumulated for this entity.
     pub fn sched_tick_cnt(&self) -> u32 {
         self.sched_tick_cnt
+    }
+}
+
+unsafe impl RBTreeNode for SchedEntity {
+    fn node(entity: *mut Self) -> *mut RbNode {
+        if entity.is_null() {
+            ptr::null_mut()
+        } else {
+            unsafe { ptr::addr_of_mut!((*entity).rb_node) }
+        }
+    }
+
+    fn entity_of(node: *mut RbNode) -> *mut Self {
+        if node.is_null() {
+            ptr::null_mut()
+        } else {
+            unsafe {
+                (node as *mut u8)
+                    .sub(offset_of!(SchedEntity, rb_node))
+                    .cast::<SchedEntity>()
+            }
+        }
+    }
+
+    fn entity_of_const(node: *const RbNode) -> *const Self {
+        if node.is_null() {
+            ptr::null()
+        } else {
+            unsafe {
+                (node as *const u8)
+                    .sub(offset_of!(SchedEntity, rb_node))
+                    .cast::<SchedEntity>()
+            }
+        }
+    }
+
+    unsafe fn cmp(a: *const Self, b: *const Self) -> core::cmp::Ordering {
+        unsafe {
+            match (*a).vruntime.cmp(&(*b).vruntime) {
+                core::cmp::Ordering::Equal => (a as usize).cmp(&(b as usize)),
+                other => other,
+            }
+        }
     }
 }
 
@@ -171,7 +213,7 @@ pub unsafe fn init_rq() {
 
 /// Enqueue a thread into the scheduler run queue.
 ///
-/// The thread's `sched_entity.vruntime` field is used as the red-black tree key.
+/// The thread's scheduler entity vruntime field is used as the red-black tree key.
 pub unsafe fn enqueue_thread(thread: *mut Thread) {
     unsafe {
         (*thread).state = ThreadState::Ready;
@@ -263,7 +305,7 @@ extern "C" fn schedule() {
 
             (*current).sched_entity.vruntime = sched_tick_cnt * priority / priority_sum;
             if let Some(next_entity) = (*RUN_QUEUE.get()).pop_first() {
-                let next_thread = thread_from_sched_entity(next_entity as *mut sched_entity);
+                let next_thread = thread_from_sched_entity(next_entity as *mut SchedEntity);
                 debug_assert!(
                     current != next_thread,
                     "RUN_QUEUE.pop_first() returned the current running thread"
@@ -293,7 +335,7 @@ fn SysTick() {
     SCB::set_pendsv();
 }
 
-unsafe fn thread_from_sched_entity(entity: *mut sched_entity) -> *mut Thread {
+unsafe fn thread_from_sched_entity(entity: *mut SchedEntity) -> *mut Thread {
     unsafe {
         (entity as *mut u8)
             .sub(offset_of!(Thread, sched_entity))
