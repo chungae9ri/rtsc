@@ -8,7 +8,6 @@ use core::ptr;
 
 use core::arch::asm;
 use cortex_m::peripheral::SCB;
-use cortex_m_rt::exception;
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{Thread, ThreadState};
@@ -323,12 +322,8 @@ extern "C" fn schedule() {
     }
 }
 
-/// SysTick handler used for scheduler tick processing.
-///
-/// A real scheduler would typically update time-based accounting here and may
-/// pend PendSV when the current thread should yield.
-#[exception]
-fn SysTick() {
+/// Handle one SysTick event and request a context switch.
+pub fn handle_systick() {
     unsafe {
         TICK_COUNT += 1;
     }
