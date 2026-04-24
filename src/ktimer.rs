@@ -6,23 +6,51 @@
 //! The queue is intrusive: each `KTimerEntity` embeds its own `RbNode`, so
 //! inserting ktimers does not allocate.
 
+use core::cell::UnsafeCell;
 use core::mem::offset_of;
 use core::ptr;
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 
+pub const SYSTICK_RELOAD_MAX: u32 = 0x00FF_FFFF;
+static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
+
+struct GlobalKTimerQueue {
+    queue: UnsafeCell<KTimerQueue>,
+}
+
+impl GlobalKTimerQueue {
+    const fn new() -> Self {
+        Self {
+            queue: UnsafeCell::new(KTimerQueue::new()),
+        }
+    }
+
+    fn get(&self) -> *mut KTimerQueue {
+        self.queue.get()
+    }
+}
+
+unsafe impl Sync for GlobalKTimerQueue {}
+
 #[repr(C)]
 pub struct KTimerEntity {
+    duration: u32,
     deadline: u32,
     node: RbNode,
 }
 
 impl KTimerEntity {
-    pub const fn new(deadline: u32) -> Self {
+    pub const fn new(duration: u32, deadline: u32) -> Self {
         Self {
+            duration,
             deadline,
             node: RbNode::new(),
         }
+    }
+
+    pub fn duration(&self) -> u32 {
+        self.duration
     }
 
     pub fn deadline(&self) -> u32 {
@@ -40,6 +68,36 @@ impl KTimerEntity {
     pub fn is_linked(&self) -> bool {
         self.node.is_linked()
     }
+}
+
+/// Convert a raw SysTick tick interval into a reload register value.
+///
+/// SysTick reload stores `tick_count - 1`, and the register is 24 bits wide.
+pub fn systick_reload_from_tick_count(tick_count: u32) -> Option<u32> {
+    tick_count
+        .checked_sub(1)
+        .filter(|&reload| reload <= SYSTICK_RELOAD_MAX)
+}
+
+pub unsafe fn init_ktimer_queue() {
+    unsafe {
+        *KTIMER_QUEUE.get() = KTimerQueue::new();
+    }
+}
+
+pub unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
+    unsafe {
+        (*entity).reset_links();
+        (*KTIMER_QUEUE.get()).insert(entity);
+    }
+}
+
+pub fn next_ktimer_deadline() -> Option<u32> {
+    unsafe { (*KTIMER_QUEUE.get()).next_deadline() }
+}
+
+pub fn next_ktimer_systick_reload() -> Option<u32> {
+    unsafe { (*KTIMER_QUEUE.get()).next_systick_reload() }
 }
 
 unsafe impl RBTreeNode for KTimerEntity {
@@ -118,6 +176,20 @@ impl KTimerQueue {
 
     pub fn next(&self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
         self.tree.next(entity)
+    }
+
+    pub fn next_deadline(&self) -> Option<u32> {
+        let first = self.first();
+        if first.is_null() {
+            None
+        } else {
+            Some(unsafe { (*first).deadline() })
+        }
+    }
+
+    pub fn next_systick_reload(&self) -> Option<u32> {
+        self.next_deadline()
+            .and_then(systick_reload_from_tick_count)
     }
 
     /// Insert a detached ktimer entity into the queue.
