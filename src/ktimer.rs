@@ -10,10 +10,14 @@ use core::cell::UnsafeCell;
 use core::mem::offset_of;
 use core::ptr;
 
+use cortex_m::peripheral::SYST;
+
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
+use crate::thread::Thread;
 
 pub const SYSTICK_RELOAD_MAX: u32 = 0x00FF_FFFF;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
+static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
 
 struct GlobalKTimerQueue {
     queue: UnsafeCell<KTimerQueue>,
@@ -34,17 +38,33 @@ impl GlobalKTimerQueue {
 unsafe impl Sync for GlobalKTimerQueue {}
 
 #[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KTimerType {
+    Cfs,
+    Rt,
+}
+
+#[repr(C)]
 pub struct KTimerEntity {
     duration: u32,
     deadline: u32,
+    timer_type: KTimerType,
+    thread: *mut Thread,
     node: RbNode,
 }
 
 impl KTimerEntity {
-    pub const fn new(duration: u32, deadline: u32) -> Self {
+    pub const fn new(
+        duration: u32,
+        deadline: u32,
+        timer_type: KTimerType,
+        thread: *mut Thread,
+    ) -> Self {
         Self {
             duration,
             deadline,
+            timer_type,
+            thread,
             node: RbNode::new(),
         }
     }
@@ -61,6 +81,26 @@ impl KTimerEntity {
         self.deadline = deadline;
     }
 
+    pub fn timer_type(&self) -> KTimerType {
+        self.timer_type
+    }
+
+    pub fn set_timer_type(&mut self, timer_type: KTimerType) {
+        self.timer_type = timer_type;
+    }
+
+    pub fn thread(&self) -> *mut Thread {
+        self.thread
+    }
+
+    pub fn init_thread(&mut self, thread: *mut Thread) {
+        self.thread = thread;
+    }
+
+    pub fn set_thread(&mut self, thread: *mut Thread) {
+        self.init_thread(thread);
+    }
+
     pub fn reset_links(&mut self) {
         self.node.reset_links();
     }
@@ -70,11 +110,11 @@ impl KTimerEntity {
     }
 }
 
-/// Convert a raw SysTick tick interval into a reload register value.
+/// Convert a raw tick interval into a SysTick reload register value.
 ///
-/// SysTick reload stores `tick_count - 1`, and the register is 24 bits wide.
-pub fn systick_reload_from_tick_count(tick_count: u32) -> Option<u32> {
-    tick_count
+/// SysTick reload stores `ticks - 1`, and the register is 24 bits wide.
+pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
+    ticks
         .checked_sub(1)
         .filter(|&reload| reload <= SYSTICK_RELOAD_MAX)
 }
@@ -96,8 +136,43 @@ pub fn next_ktimer_deadline() -> Option<u32> {
     unsafe { (*KTIMER_QUEUE.get()).next_deadline() }
 }
 
-pub fn next_ktimer_systick_reload() -> Option<u32> {
-    unsafe { (*KTIMER_QUEUE.get()).next_systick_reload() }
+pub fn next_ktimer_reload() -> Option<u32> {
+    unsafe { (*KTIMER_QUEUE.get()).next_reload() }
+}
+
+pub(crate) fn elapsed_ticks_since_last_interrupt() -> u32 {
+    SYST::get_reload().saturating_add(1)
+}
+
+pub(crate) unsafe fn advance_ktimers(elapsed: u32) {
+    unsafe {
+        (*KTIMER_QUEUE.get()).advance(elapsed);
+    }
+}
+
+pub(crate) unsafe fn dispatch_expired_ktimer() -> *mut KTimerEntity {
+    unsafe { (*KTIMER_QUEUE.get()).dispatch_expired() }
+}
+
+pub(crate) unsafe fn update_next_ktimer(entity: *mut KTimerEntity) {
+    unsafe {
+        NEXT_KTIMER = entity;
+    }
+}
+
+pub(crate) fn next_ktimer() -> *mut KTimerEntity {
+    unsafe { NEXT_KTIMER }
+}
+
+pub(crate) fn program_next_systick() -> Option<u32> {
+    let reload = next_ktimer_reload()?;
+
+    unsafe {
+        (*SYST::PTR).rvr.write(reload);
+        (*SYST::PTR).cvr.write(0);
+    }
+
+    Some(reload)
 }
 
 unsafe impl RBTreeNode for KTimerEntity {
@@ -187,9 +262,33 @@ impl KTimerQueue {
         }
     }
 
-    pub fn next_systick_reload(&self) -> Option<u32> {
-        self.next_deadline()
-            .and_then(systick_reload_from_tick_count)
+    pub fn next_reload(&self) -> Option<u32> {
+        self.next_deadline().and_then(reload_from_ticks)
+    }
+
+    pub unsafe fn advance(&mut self, elapsed: u32) {
+        unsafe {
+            let mut entity = self.first();
+            while !entity.is_null() {
+                let next = self.next(entity);
+                (*entity).deadline = (*entity).deadline.saturating_sub(elapsed);
+                entity = next;
+            }
+        }
+    }
+
+    pub unsafe fn dispatch_expired(&mut self) -> *mut KTimerEntity {
+        unsafe {
+            let first = self.first();
+            if first.is_null() || (*first).deadline != 0 {
+                return ptr::null_mut();
+            }
+
+            self.remove(first);
+            (*first).deadline = (*first).duration();
+            self.insert(first);
+            first
+        }
     }
 
     /// Insert a detached ktimer entity into the queue.

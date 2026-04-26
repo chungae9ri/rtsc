@@ -25,6 +25,16 @@ pub enum ThreadState {
     Suspended,
 }
 
+/// Scheduling class for a thread.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ThreadType {
+    /// Thread scheduled by the CFS run queue.
+    Cfs,
+    /// Thread scheduled by a EDF (Earliest Deadline First).
+    Rt,
+}
+
 /// Registers that must be preserved across a context switch on Cortex-M.
 ///
 /// These are the callee-saved general-purpose registers under the ARM ABI.
@@ -73,6 +83,8 @@ pub struct Thread {
     pub id: u32,
     /// Human-readable thread name for logs and diagnostics.
     pub name: &'static str,
+    /// Scheduling class assigned to this thread.
+    pub thread_type: ThreadType,
     /// Current lifecycle state used by the scheduler.
     pub state: ThreadState,
     /// Scheduler entity used for run-queue ordering.
@@ -87,6 +99,7 @@ pub unsafe fn forkyi(
     entry: extern "C" fn(*mut core::ffi::c_void) -> !,
     arg: *mut core::ffi::c_void,
     name: &'static str,
+    thread_type: ThreadType,
     priority: u32,
 ) {
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
@@ -127,6 +140,7 @@ pub unsafe fn forkyi(
             exc_return: 0xFFFF_FFFD,
             id,
             name,
+            thread_type,
             state: ThreadState::Ready,
             sched_entity: SchedEntity::new(priority),
             callee_saved_regs: CalleeSavedRegisters {
@@ -140,6 +154,8 @@ pub unsafe fn forkyi(
                 r11: 0,
             },
         };
-        enqueue_thread(thread);
+        if thread_type == ThreadType::Cfs {
+            enqueue_thread(thread);
+        }
     }
 }
