@@ -317,10 +317,15 @@ extern "C" fn schedule() {
         // The scheduler logic is as follows:
         // - If the CURRENT_THREAD is CFS, update its vruntime based on the elapsed
         //   ticks and its priority.
-        // - If the next expired ktimer is for a CFS thread, compare its vruntime with
-        //   the CURRENT_THREAD's vruntime to decide whether to preempt.
-        // - If the next expired ktimer is for an RT thread, preempt the CURRENT_THREAD
-        //   regardless of its type.
+        // - If the next expired ktimer is for a CFS thread and current thread is
+        //   CFS thread, compare its vruntime with the CURRENT_THREAD's vruntime
+        //   to decide whether to preempt.
+        // - If the next expired ktimer is for a CFS thread and current thread is
+        //   RT thread, switch to the left-most CFS thread.
+        // - If the next expired ktimer is for an RT thread and current thread is
+        //   CFS thread, insert current to CFS runq and switch to next RT thread.
+        // - If the next expired ktimer is for an RT thread and current thread is
+        //   RT thread,preempt the CURRENT_THREAD with next RT thread.
         if !CURRENT_THREAD.is_null() && (*CURRENT_THREAD).state == ThreadState::Running {
             if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
                 (*CURRENT_THREAD).sched_entity.sched_tick_cnt +=
