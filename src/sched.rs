@@ -9,20 +9,26 @@ use core::ptr;
 use core::arch::asm;
 use cortex_m::peripheral::SCB;
 
+use crate::ktimer::{
+    KTimerEntity, KTimerType, advance_ktimers, dispatch_expired_ktimer,
+    elapsed_ticks_since_last_interrupt, enqueue_ktimer, next_ktimer, program_next_systick,
+    update_next_ktimer,
+};
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
-use crate::thread::{Thread, ThreadState};
+use crate::thread::{Thread, ThreadState, ThreadType};
 //use rtt_target::rprintln;
 
-static mut TICK_COUNT: u32 = 0;
-static RUN_QUEUE: RunQueue = RunQueue::new();
+static mut CFS_TIMER_ENTITY: KTimerEntity =
+    KTimerEntity::new(0, 0, KTimerType::Cfs, ptr::null_mut::<Thread>());
+static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
 #[unsafe(no_mangle)]
-pub static mut current: *mut Thread = ptr::null_mut();
+pub static mut CURRENT_THREAD: *mut Thread = ptr::null_mut();
 #[unsafe(no_mangle)]
 static mut START_THREAD_PTR: *mut Thread = ptr::null_mut();
 
 struct RunQueue {
     tree: UnsafeCell<RBTree<SchedEntity>>,
-    priority_sum: UnsafeCell<u64>,
+    priority_sum: UnsafeCell<u32>,
 }
 
 impl RunQueue {
@@ -37,7 +43,7 @@ impl RunQueue {
         self.tree.get()
     }
 
-    fn priority_sum(&self) -> *mut u64 {
+    fn priority_sum(&self) -> *mut u32 {
         self.priority_sum.get()
     }
 }
@@ -135,12 +141,12 @@ unsafe impl RBTreeNode for SchedEntity {
 }
 
 pub unsafe fn init_current(thread: *mut Thread) {
-    unsafe { current = thread };
+    unsafe { CURRENT_THREAD = thread };
 }
 
 /// Traverse the scheduler-visible threads, including the running thread.
 ///
-/// Pass `None` to get the current running thread when one exists; otherwise
+/// Pass `None` to get the CURRENT_THREAD running thread when one exists; otherwise
 /// this returns the first queued thread. Pass the previously returned thread to
 /// get the next entry. After the running thread, traversal continues through
 /// the run queue in ascending vruntime order. Returns `None` after the last
@@ -153,11 +159,11 @@ pub unsafe fn init_current(thread: *mut Thread) {
 /// mutated in a way that invalidates the traversal step.
 pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thread> {
     unsafe {
-        let tree = &*RUN_QUEUE.get();
+        let tree = &*CFS_RUN_QUEUE.get();
         match cursor {
             None => {
-                if !current.is_null() {
-                    Some(current)
+                if !CURRENT_THREAD.is_null() {
+                    Some(CURRENT_THREAD)
                 } else {
                     let first = tree.first();
                     if first.is_null() {
@@ -167,7 +173,7 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thr
                     }
                 }
             }
-            Some(thread) if thread == current => {
+            Some(thread) if thread == CURRENT_THREAD => {
                 let first = tree.first();
                 if first.is_null() {
                     None
@@ -195,7 +201,7 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thr
 /// handler mode.
 pub unsafe fn spawn_main_thread(thread: *mut Thread) -> ! {
     unsafe {
-        (*RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*thread).sched_entity));
+        (*CFS_RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*thread).sched_entity));
         (*thread).state = ThreadState::Running;
         START_THREAD_PTR = thread;
         asm!("svc 0", options(noreturn));
@@ -203,10 +209,23 @@ pub unsafe fn spawn_main_thread(thread: *mut Thread) -> ! {
 }
 
 /// Reset the scheduler run queue to an empty state.
-pub unsafe fn init_rq() {
+unsafe fn init_cfs_rq() {
     unsafe {
-        *RUN_QUEUE.get() = RBTree::new();
-        *RUN_QUEUE.priority_sum() = 0;
+        *CFS_RUN_QUEUE.get() = RBTree::new();
+        *CFS_RUN_QUEUE.priority_sum() = 0;
+    }
+}
+
+/// Initialize the CFS scheduler state and enqueue its scheduler timer.
+///
+/// `ticks` is expressed in raw timer ticks because the board owns the clock
+/// configuration.
+pub unsafe fn init_cfs(ticks: u32) {
+    unsafe {
+        init_cfs_rq();
+        CFS_TIMER_ENTITY =
+            KTimerEntity::new(ticks, ticks, KTimerType::Cfs, ptr::null_mut::<Thread>());
+        enqueue_ktimer(ptr::addr_of_mut!(CFS_TIMER_ENTITY));
     }
 }
 
@@ -217,8 +236,8 @@ pub unsafe fn enqueue_thread(thread: *mut Thread) {
     unsafe {
         (*thread).state = ThreadState::Ready;
         (*thread).sched_entity.reset_links();
-        (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*thread).sched_entity));
-        *RUN_QUEUE.priority_sum() += u64::from((*thread).sched_entity.priority);
+        (*CFS_RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*thread).sched_entity));
+        *CFS_RUN_QUEUE.priority_sum() += (*thread).sched_entity.priority;
     }
 }
 
@@ -226,8 +245,8 @@ pub unsafe fn enqueue_thread(thread: *mut Thread) {
 pub unsafe fn dequeue_thread(thread: *mut Thread) {
     unsafe {
         if (*thread).state == ThreadState::Ready {
-            (*RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*thread).sched_entity));
-            *RUN_QUEUE.priority_sum() -= u64::from((*thread).sched_entity.priority);
+            (*CFS_RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*thread).sched_entity));
+            *CFS_RUN_QUEUE.priority_sum() -= (*thread).sched_entity.priority;
         }
     }
 }
@@ -241,8 +260,8 @@ global_asm!(
     "SVCall:",
     "ldr r0, =START_THREAD_PTR",
     "ldr r0, [r0]", // r0 = thread
-    "ldr r3, =current",
-    "str r0, [r3]",          // current = thread
+    "ldr r3, =CURRENT_THREAD",
+    "str r0, [r3]",          // CURRENT_THREAD = thread
     "ldr r1, [r0]",          // r1 = thread->sp
     "ldr lr, [r0, #4]",      // lr = thread->exc_return
     "ldmia r1!, {{r4-r11}}", // restore callee-saved registers
@@ -256,7 +275,7 @@ global_asm!(
 
 // PendSV handler used for context switching between threads.
 // The actual context switch happens in the assembly code, but the scheduler is
-// called from here to select the next thread to run and update `current`.
+// called from here to select the next thread to run and update `CURRENT_THREAD`.
 // Threads are expected to have their stack frames (PSP) prepared by `forkyi` so that the
 // assembly code can save and restore them without needing to understand the layout.
 global_asm!(
@@ -266,20 +285,20 @@ global_asm!(
     "PendSV:",
     "tst lr, #4", // Was the interrupted thread using PSP or MSP
     "ite eq",
-    "mrseq r0, msp",         // Thread used MSP.
-    "mrsne r0, psp",         // Thread used PSP.
-    "stmdb r0!, {{r4-r11}}", // Save callee-saved registers on the thread stack.
-    "ldr r1, =current",      // R1 = &current
-    "ldr r2, [r1]",          // R2 = current thread pointer
-    "str r0, [r2]",          // Save updated stack pointer into the thread control block.
-    "str lr, [r2, #4]",      // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
-    "bl schedule",           // Pick the next thread and update current.
-    "ldr r1, =current",      // R1 = &current
-    "ldr r2, [r1]",          // R2 = next thread pointer
-    "ldr r0, [r2]",          // R0 = next thread's saved SP
-    "ldr lr, [r2, #4]",      // LR = next thread's saved EXC_RETURN
-    "ldmia r0!, {{r4-r11}}", // Restore callee-saved registers for the selected thread.
-    "tst lr, #4",            // Does the next thread return using MSP or PSP?
+    "mrseq r0, msp",           // Thread used MSP.
+    "mrsne r0, psp",           // Thread used PSP.
+    "stmdb r0!, {{r4-r11}}",   // Save callee-saved registers on the thread stack.
+    "ldr r1, =CURRENT_THREAD", // R1 = &CURRENT_THREAD
+    "ldr r2, [r1]",            // R2 = CURRENT_THREAD thread pointer
+    "str r0, [r2]",            // Save updated stack pointer into the thread control block.
+    "str lr, [r2, #4]",        // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
+    "bl schedule",             // Run the CURRENT_THREAD ktimer handler and update CURRENT_THREAD.
+    "ldr r1, =CURRENT_THREAD", // R1 = &CURRENT_THREAD
+    "ldr r2, [r1]",            // R2 = next thread pointer
+    "ldr r0, [r2]",            // R0 = next thread's saved SP
+    "ldr lr, [r2, #4]",        // LR = next thread's saved EXC_RETURN
+    "ldmia r0!, {{r4-r11}}",   // Restore callee-saved registers for the selected thread.
+    "tst lr, #4",              // Does the next thread return using MSP or PSP?
     "ite eq",
     "msreq msp, r0", // Restore MSP-backed context.
     "msrne psp, r0", // Restore PSP-backed context.
@@ -289,45 +308,99 @@ global_asm!(
 #[unsafe(no_mangle)]
 extern "C" fn schedule() {
     unsafe {
-        if !current.is_null() && (*current).state == ThreadState::Running {
-            debug_assert!(
-                !(*current).sched_entity.is_linked(),
-                "running thread is still linked in RUN_QUEUE before scheduling"
-            );
-            (*current).sched_entity.sched_tick_cnt += 1;
-            let priority_sum = *RUN_QUEUE.priority_sum();
-            if priority_sum == 0 {
-                return;
-            }
-            let sched_tick_cnt = u64::from((*current).sched_entity.sched_tick_cnt);
-            let priority = u64::from((*current).sched_entity.priority);
+        let next_ktimer = next_ktimer();
+        if next_ktimer.is_null() {
+            program_next_systick();
+            return;
+        }
 
-            (*current).sched_entity.vruntime = sched_tick_cnt * priority / priority_sum;
-            if let Some(next_entity) = (*RUN_QUEUE.get()).pop_first() {
-                let next_thread = thread_from_sched_entity(next_entity as *mut SchedEntity);
-                debug_assert!(
-                    current != next_thread,
-                    "RUN_QUEUE.pop_first() returned the current running thread"
-                );
-                if (*current).sched_entity.vruntime > (*next_thread).sched_entity.vruntime {
-                    (*current).state = ThreadState::Ready;
-                    (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*current).sched_entity));
+        // The scheduler logic is as follows:
+        // - If the CURRENT_THREAD is CFS, update its vruntime based on the elapsed
+        //   ticks and its priority.
+        // - If the next expired ktimer is for a CFS thread, compare its vruntime with
+        //   the CURRENT_THREAD's vruntime to decide whether to preempt.
+        // - If the next expired ktimer is for an RT thread, preempt the CURRENT_THREAD
+        //   regardless of its type.
+        if !CURRENT_THREAD.is_null() && (*CURRENT_THREAD).state == ThreadState::Running {
+            if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
+                (*CURRENT_THREAD).sched_entity.sched_tick_cnt +=
+                    elapsed_ticks_since_last_interrupt();
+                let priority_sum = *CFS_RUN_QUEUE.priority_sum();
+                if priority_sum == 0 {
+                    return;
+                }
+                let sched_tick_cnt = u64::from((*CURRENT_THREAD).sched_entity.sched_tick_cnt);
+                let priority = u64::from((*CURRENT_THREAD).sched_entity.priority);
+                let priority_sum = u64::from(priority_sum);
+
+                (*CURRENT_THREAD).sched_entity.vruntime = sched_tick_cnt * priority / priority_sum;
+            }
+
+            if (*next_ktimer).timer_type() == KTimerType::Cfs {
+                if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
+                    let next_thread = thread_from_sched_entity(next_entity as *mut SchedEntity);
+
+                    if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
+                        debug_assert!(
+                            CURRENT_THREAD != next_thread,
+                            "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD running thread"
+                        );
+                        if (*CURRENT_THREAD).sched_entity.vruntime
+                            > (*next_thread).sched_entity.vruntime
+                        {
+                            (*CURRENT_THREAD).state = ThreadState::Ready;
+                            (*CFS_RUN_QUEUE.get())
+                                .insert(ptr::addr_of_mut!((*CURRENT_THREAD).sched_entity));
+                            (*next_thread).state = ThreadState::Running;
+                            CURRENT_THREAD = next_thread;
+                        } else {
+                            (*CFS_RUN_QUEUE.get())
+                                .insert(ptr::addr_of_mut!((*next_thread).sched_entity));
+                        }
+                    } else if (*CURRENT_THREAD).thread_type == ThreadType::Rt {
+                        (*CURRENT_THREAD).state = ThreadState::Ready;
+                        (*next_thread).state = ThreadState::Running;
+                        CURRENT_THREAD = next_thread;
+                    }
+                }
+            } else if (*next_ktimer).timer_type() == KTimerType::Rt {
+                let next_thread = (*next_ktimer).thread();
+                if next_thread.is_null() {
+                    return;
+                }
+
+                if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
+                    (*CURRENT_THREAD).state = ThreadState::Ready;
+                    (*CFS_RUN_QUEUE.get())
+                        .insert(ptr::addr_of_mut!((*CURRENT_THREAD).sched_entity));
                     (*next_thread).state = ThreadState::Running;
-                    current = next_thread;
-                } else {
-                    (*RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*next_thread).sched_entity));
+                    CURRENT_THREAD = next_thread;
+                } else if (*CURRENT_THREAD).thread_type == ThreadType::Rt {
+                    CURRENT_THREAD = next_thread;
                 }
             }
         }
+
+        program_next_systick();
     }
 }
 
-/// Handle one SysTick event and request a context switch.
+/// Handle one SysTick event and request ktimer dispatch.
 pub fn handle_systick() {
+    let elapsed = elapsed_ticks_since_last_interrupt();
+
+    let next_ktimer = unsafe {
+        advance_ktimers(elapsed);
+        dispatch_expired_ktimer()
+    };
+
     unsafe {
-        TICK_COUNT += 1;
+        update_next_ktimer(next_ktimer);
     }
-    SCB::set_pendsv();
+
+    if !next_ktimer.is_null() {
+        SCB::set_pendsv();
+    }
 }
 
 unsafe fn thread_from_sched_entity(entity: *mut SchedEntity) -> *mut Thread {
