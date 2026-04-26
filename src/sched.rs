@@ -57,7 +57,7 @@ unsafe impl Sync for RunQueue {}
 /// order remains deterministic and the tree keeps a strict total ordering.
 #[repr(C)]
 pub struct SchedEntity {
-    pub(crate) sched_tick_cnt: u32,
+    pub(crate) sched_tick_cnt: u64,
     /// Scheduler virtual runtime metric used as the red-black tree key.
     pub(crate) vruntime: u64,
     /// Scheduling priority, where the exact ordering is defined by the scheduler.
@@ -92,7 +92,7 @@ impl SchedEntity {
     }
 
     /// Return the scheduler tick count accumulated for this entity.
-    pub fn sched_tick_cnt(&self) -> u32 {
+    pub fn sched_tick_cnt(&self) -> u64 {
         self.sched_tick_cnt
     }
 }
@@ -329,12 +329,12 @@ extern "C" fn schedule() {
         if !CURRENT_THREAD.is_null() && (*CURRENT_THREAD).state == ThreadState::Running {
             if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
                 (*CURRENT_THREAD).sched_entity.sched_tick_cnt +=
-                    elapsed_ticks_since_last_interrupt();
+                    u64::from(elapsed_ticks_since_last_interrupt());
                 let priority_sum = *CFS_RUN_QUEUE.priority_sum();
                 if priority_sum == 0 {
                     return;
                 }
-                let sched_tick_cnt = u64::from((*CURRENT_THREAD).sched_entity.sched_tick_cnt);
+                let sched_tick_cnt = (*CURRENT_THREAD).sched_entity.sched_tick_cnt;
                 let priority = u64::from((*CURRENT_THREAD).sched_entity.priority);
                 let priority_sum = u64::from(priority_sum);
 
