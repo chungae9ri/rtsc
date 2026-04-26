@@ -3,7 +3,12 @@
 
 //! Core thread definitions for the runtime scheduler.
 
-use crate::sched::{SchedEntity, enqueue_thread};
+use core::ptr;
+
+use cortex_m::peripheral::SCB;
+
+use crate::ktimer::update_next_ktimer;
+use crate::sched::{CFS_RUN_QUEUE, CFS_TIMER_ENTITY, CURRENT_THREAD, SchedEntity, enqueue_thread};
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -157,5 +162,25 @@ pub unsafe fn forkyi(
         if thread_type == ThreadType::Cfs {
             enqueue_thread(thread);
         }
+    }
+}
+
+/// Cooperatively yield the CPU from the running RT thread to the left-most CFS thread.
+///
+/// This is intended for application RT threads that have completed their current
+/// job and want to give CFS work a chance to run before the next RT release.
+/// Calling this from a non-RT thread, before a current thread exists, or when no
+/// CFS thread is runnable is a no-op.
+pub fn yieldyi() {
+    unsafe {
+        if CURRENT_THREAD.is_null()
+            || (*CURRENT_THREAD).thread_type != ThreadType::Rt
+            || (*CFS_RUN_QUEUE.get()).first().is_null()
+        {
+            return;
+        }
+
+        update_next_ktimer(ptr::addr_of_mut!(CFS_TIMER_ENTITY));
+        SCB::set_pendsv();
     }
 }

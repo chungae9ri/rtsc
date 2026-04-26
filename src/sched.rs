@@ -18,15 +18,15 @@ use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{Thread, ThreadState, ThreadType};
 //use rtt_target::rprintln;
 
-static mut CFS_TIMER_ENTITY: KTimerEntity =
+pub(crate) static mut CFS_TIMER_ENTITY: KTimerEntity =
     KTimerEntity::new(0, 0, KTimerType::Cfs, ptr::null_mut::<Thread>());
-static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
+pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD: *mut Thread = ptr::null_mut();
 #[unsafe(no_mangle)]
 static mut START_THREAD_PTR: *mut Thread = ptr::null_mut();
 
-struct RunQueue {
+pub(crate) struct RunQueue {
     tree: UnsafeCell<RBTree<SchedEntity>>,
     priority_sum: UnsafeCell<u32>,
 }
@@ -39,7 +39,7 @@ impl RunQueue {
         }
     }
 
-    fn get(&self) -> *mut RBTree<SchedEntity> {
+    pub(crate) fn get(&self) -> *mut RBTree<SchedEntity> {
         self.tree.get()
     }
 
