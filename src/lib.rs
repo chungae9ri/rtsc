@@ -9,7 +9,9 @@ mod sched;
 mod thread;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
-pub use thread::{AlignedStack, Thread, ThreadState, ThreadType, forkyi, yieldyi};
+pub use thread::{
+    AlignedStack, CfsThread, RtThread, Thread, ThreadControlBlock, ThreadState, forkyi, yieldyi,
+};
 
 pub use ktimer::{
     KTimerEntity, KTimerQueue, KTimerType, enqueue_ktimer, init_ktimer_queue, next_ktimer_deadline,

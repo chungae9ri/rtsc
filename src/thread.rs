@@ -3,12 +3,16 @@
 
 //! Core thread definitions for the runtime scheduler.
 
+use core::mem::offset_of;
 use core::ptr;
 
 use cortex_m::peripheral::SCB;
 
 use crate::ktimer::update_next_ktimer;
-use crate::sched::{CFS_RUN_QUEUE, CFS_TIMER_ENTITY, CURRENT_THREAD, SchedEntity, enqueue_thread};
+use crate::sched::{
+    CFS_RUN_QUEUE, CFS_TIMER_ENTITY, CURRENT_THREAD, CURRENT_THREAD_IS_CFS, SchedEntity,
+    enqueue_thread, thread_is_cfs,
+};
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -28,16 +32,6 @@ pub enum ThreadState {
     Blocked,
     /// The thread has been paused explicitly and will not be scheduled.
     Suspended,
-}
-
-/// Scheduling class for a thread.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ThreadType {
-    /// Thread scheduled by the CFS run queue.
-    Cfs,
-    /// Thread scheduled by a EDF (Earliest Deadline First).
-    Rt,
 }
 
 /// Registers that must be preserved across a context switch on Cortex-M.
@@ -69,7 +63,7 @@ pub struct CalleeSavedRegisters {
 #[repr(align(8))]
 pub struct AlignedStack<const N: usize>(pub [u32; N]);
 
-/// Scheduler-visible thread control block.
+/// Common scheduler-visible thread context.
 ///
 /// `sp` points at the saved stack frame used when restoring the thread. When
 /// `exc_return` records whether that saved frame belongs to MSP or PSP, and
@@ -88,25 +82,91 @@ pub struct Thread {
     pub id: u32,
     /// Human-readable thread name for logs and diagnostics.
     pub name: &'static str,
-    /// Scheduling class assigned to this thread.
-    pub thread_type: ThreadType,
     /// Current lifecycle state used by the scheduler.
     pub state: ThreadState,
-    /// Scheduler entity used for run-queue ordering.
-    pub sched_entity: SchedEntity,
     /// Software view of the callee-saved register set for this thread.
     pub callee_saved_regs: CalleeSavedRegisters,
 }
 
-pub unsafe fn forkyi(
-    thread: *mut Thread,
+impl Thread {
+    /// Return the CFS scheduling entity for this thread, when this is a CFS thread.
+    pub fn sched_entity(&self) -> Option<&SchedEntity> {
+        if thread_is_cfs(self as *const Thread) {
+            Some(unsafe { &*cfs_sched_entity(self as *const Thread as *mut Thread) })
+        } else {
+            None
+        }
+    }
+}
+
+/// Thread control block for CFS-scheduled threads.
+#[repr(C)]
+pub struct CfsThread {
+    /// Common context. This must remain the first field because assembly and
+    /// timer code use `*mut Thread` as the shared thin pointer type.
+    pub thread: Thread,
+    /// Scheduler entity used for CFS run-queue ordering.
+    pub sched_entity: SchedEntity,
+}
+
+/// Thread control block for RT-scheduled threads.
+#[repr(C)]
+pub struct RtThread {
+    /// Common context. This must remain the first field because assembly and
+    /// timer code use `*mut Thread` as the shared thin pointer type.
+    pub thread: Thread,
+}
+
+/// Scheduler-class-specific initialization for concrete thread control blocks.
+pub trait ThreadControlBlock {
+    const IS_CFS: bool;
+
+    /// Initialize the concrete thread storage and return its common thread pointer.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must point to valid writable storage for `Self`.
+    unsafe fn init(thread: *mut Self, common: Thread, priority: u32) -> *mut Thread;
+}
+
+impl ThreadControlBlock for CfsThread {
+    const IS_CFS: bool = true;
+
+    unsafe fn init(thread: *mut Self, common: Thread, priority: u32) -> *mut Thread {
+        unsafe {
+            ptr::write(
+                thread,
+                CfsThread {
+                    thread: common,
+                    sched_entity: SchedEntity::new(priority),
+                },
+            );
+            let common_thread = ptr::addr_of_mut!((*thread).thread);
+            enqueue_thread(common_thread);
+            common_thread
+        }
+    }
+}
+
+impl ThreadControlBlock for RtThread {
+    const IS_CFS: bool = false;
+
+    unsafe fn init(thread: *mut Self, common: Thread, _priority: u32) -> *mut Thread {
+        unsafe {
+            ptr::write(thread, RtThread { thread: common });
+            ptr::addr_of_mut!((*thread).thread)
+        }
+    }
+}
+
+pub unsafe fn forkyi<T: ThreadControlBlock>(
+    thread: *mut T,
     mut sp: *mut u32,
     entry: extern "C" fn(*mut core::ffi::c_void) -> !,
     arg: *mut core::ffi::c_void,
     name: &'static str,
-    thread_type: ThreadType,
     priority: u32,
-) {
+) -> *mut Thread {
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
     // PSP, exception return consumes a standard hardware frame:
     // r0, r1, r2, r3, r12, lr, pc, xpsr.
@@ -140,14 +200,12 @@ pub unsafe fn forkyi(
         }
         let id = NEXT_THREAD_ID;
         NEXT_THREAD_ID = NEXT_THREAD_ID.wrapping_add(1);
-        *thread = Thread {
+        let common = Thread {
             sp: sp as u32,
             exc_return: 0xFFFF_FFFD,
             id,
             name,
-            thread_type,
             state: ThreadState::Ready,
-            sched_entity: SchedEntity::new(priority),
             callee_saved_regs: CalleeSavedRegisters {
                 r4: 0,
                 r5: 0,
@@ -159,10 +217,28 @@ pub unsafe fn forkyi(
                 r11: 0,
             },
         };
-        if thread_type == ThreadType::Cfs {
-            enqueue_thread(thread);
-        }
+        T::init(thread, common, priority)
     }
+}
+
+pub(crate) unsafe fn cfs_sched_entity(thread: *mut Thread) -> *mut SchedEntity {
+    debug_assert!(!thread.is_null());
+
+    let cfs_thread = (thread as *mut u8)
+        .wrapping_sub(offset_of!(CfsThread, thread))
+        .cast::<CfsThread>();
+
+    unsafe { ptr::addr_of_mut!((*cfs_thread).sched_entity) }
+}
+
+pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *mut Thread {
+    debug_assert!(!entity.is_null());
+
+    let cfs_thread = (entity as *mut u8)
+        .wrapping_sub(offset_of!(CfsThread, sched_entity))
+        .cast::<CfsThread>();
+
+    unsafe { ptr::addr_of_mut!((*cfs_thread).thread) }
 }
 
 /// Cooperatively yield the CPU from the running RT thread to the left-most CFS thread.
@@ -174,7 +250,7 @@ pub unsafe fn forkyi(
 pub fn yieldyi() {
     unsafe {
         if CURRENT_THREAD.is_null()
-            || (*CURRENT_THREAD).thread_type != ThreadType::Rt
+            || CURRENT_THREAD_IS_CFS
             || (*CFS_RUN_QUEUE.get()).first().is_null()
         {
             return;

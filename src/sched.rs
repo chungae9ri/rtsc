@@ -15,7 +15,9 @@ use crate::ktimer::{
     update_next_ktimer,
 };
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
-use crate::thread::{Thread, ThreadState, ThreadType};
+use crate::thread::{
+    Thread, ThreadControlBlock, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
+};
 //use rtt_target::rprintln;
 
 pub(crate) static mut CFS_TIMER_ENTITY: KTimerEntity =
@@ -23,6 +25,7 @@ pub(crate) static mut CFS_TIMER_ENTITY: KTimerEntity =
 pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD: *mut Thread = ptr::null_mut();
+pub(crate) static mut CURRENT_THREAD_IS_CFS: bool = false;
 #[unsafe(no_mangle)]
 static mut START_THREAD_PTR: *mut Thread = ptr::null_mut();
 
@@ -140,8 +143,34 @@ unsafe impl RBTreeNode for SchedEntity {
     }
 }
 
-pub unsafe fn init_current(thread: *mut Thread) {
-    unsafe { CURRENT_THREAD = thread };
+pub unsafe fn init_current<T: ThreadControlBlock>(thread: *mut T) {
+    unsafe {
+        CURRENT_THREAD = thread.cast::<Thread>();
+        CURRENT_THREAD_IS_CFS = T::IS_CFS;
+    }
+}
+
+pub(crate) fn thread_is_cfs(thread: *const Thread) -> bool {
+    if thread.is_null() {
+        return false;
+    }
+
+    unsafe {
+        if thread == CURRENT_THREAD.cast_const() {
+            return CURRENT_THREAD_IS_CFS;
+        }
+
+        let tree = &*CFS_RUN_QUEUE.get();
+        let mut entity = tree.first();
+        while !entity.is_null() {
+            if thread_from_cfs_sched_entity(entity).cast_const() == thread {
+                return true;
+            }
+            entity = tree.next(entity);
+        }
+    }
+
+    false
 }
 
 /// Traverse the scheduler-visible threads, including the running thread.
@@ -169,7 +198,7 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thr
                     if first.is_null() {
                         None
                     } else {
-                        Some(thread_from_sched_entity(first))
+                        Some(thread_from_cfs_sched_entity(first))
                     }
                 }
             }
@@ -178,15 +207,15 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thr
                 if first.is_null() {
                     None
                 } else {
-                    Some(thread_from_sched_entity(first))
+                    Some(thread_from_cfs_sched_entity(first))
                 }
             }
             Some(thread) => {
-                let next = tree.next(ptr::addr_of!((*thread).sched_entity).cast_mut());
+                let next = tree.next(cfs_sched_entity(thread));
                 if next.is_null() {
                     None
                 } else {
-                    Some(thread_from_sched_entity(next))
+                    Some(thread_from_cfs_sched_entity(next))
                 }
             }
         }
@@ -201,9 +230,10 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thr
 /// handler mode.
 pub unsafe fn spawn_main_thread(thread: *mut Thread) -> ! {
     unsafe {
-        (*CFS_RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*thread).sched_entity));
+        (*CFS_RUN_QUEUE.get()).remove(cfs_sched_entity(thread));
         (*thread).state = ThreadState::Running;
         START_THREAD_PTR = thread;
+        CURRENT_THREAD_IS_CFS = true;
         asm!("svc 0", options(noreturn));
     }
 }
@@ -235,9 +265,10 @@ pub unsafe fn init_cfs(ticks: u32) {
 pub unsafe fn enqueue_thread(thread: *mut Thread) {
     unsafe {
         (*thread).state = ThreadState::Ready;
-        (*thread).sched_entity.reset_links();
-        (*CFS_RUN_QUEUE.get()).insert(ptr::addr_of_mut!((*thread).sched_entity));
-        *CFS_RUN_QUEUE.priority_sum() += (*thread).sched_entity.priority;
+        let entity = cfs_sched_entity(thread);
+        (*entity).reset_links();
+        (*CFS_RUN_QUEUE.get()).insert(entity);
+        *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
     }
 }
 
@@ -245,8 +276,9 @@ pub unsafe fn enqueue_thread(thread: *mut Thread) {
 pub unsafe fn dequeue_thread(thread: *mut Thread) {
     unsafe {
         if (*thread).state == ThreadState::Ready {
-            (*CFS_RUN_QUEUE.get()).remove(ptr::addr_of_mut!((*thread).sched_entity));
-            *CFS_RUN_QUEUE.priority_sum() -= (*thread).sched_entity.priority;
+            let entity = cfs_sched_entity(thread);
+            (*CFS_RUN_QUEUE.get()).remove(entity);
+            *CFS_RUN_QUEUE.priority_sum() -= (*entity).priority;
         }
     }
 }
@@ -327,45 +359,44 @@ extern "C" fn schedule() {
         // - If the next expired ktimer is for an RT thread and current thread is
         //   RT thread,preempt the CURRENT_THREAD with next RT thread.
         if !CURRENT_THREAD.is_null() && (*CURRENT_THREAD).state == ThreadState::Running {
-            if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
-                (*CURRENT_THREAD).sched_entity.sched_tick_cnt +=
-                    u64::from(elapsed_ticks_since_last_interrupt());
+            if CURRENT_THREAD_IS_CFS {
+                let current_entity = cfs_sched_entity(CURRENT_THREAD);
+                (*current_entity).sched_tick_cnt += u64::from(elapsed_ticks_since_last_interrupt());
                 let priority_sum = *CFS_RUN_QUEUE.priority_sum();
                 if priority_sum == 0 {
                     return;
                 }
-                let sched_tick_cnt = (*CURRENT_THREAD).sched_entity.sched_tick_cnt;
-                let priority = u64::from((*CURRENT_THREAD).sched_entity.priority);
+                let sched_tick_cnt = (*current_entity).sched_tick_cnt;
+                let priority = u64::from((*current_entity).priority);
                 let priority_sum = u64::from(priority_sum);
 
-                (*CURRENT_THREAD).sched_entity.vruntime = sched_tick_cnt * priority / priority_sum;
+                (*current_entity).vruntime = sched_tick_cnt * priority / priority_sum;
             }
 
             if (*next_ktimer).timer_type() == KTimerType::Cfs {
                 if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
-                    let next_thread = thread_from_sched_entity(next_entity as *mut SchedEntity);
+                    let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
 
-                    if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
+                    if CURRENT_THREAD_IS_CFS {
+                        let current_entity = cfs_sched_entity(CURRENT_THREAD);
                         debug_assert!(
                             CURRENT_THREAD != next_thread,
                             "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD running thread"
                         );
-                        if (*CURRENT_THREAD).sched_entity.vruntime
-                            > (*next_thread).sched_entity.vruntime
-                        {
+                        if (*current_entity).vruntime > (*next_entity).vruntime {
                             (*CURRENT_THREAD).state = ThreadState::Ready;
-                            (*CFS_RUN_QUEUE.get())
-                                .insert(ptr::addr_of_mut!((*CURRENT_THREAD).sched_entity));
+                            (*CFS_RUN_QUEUE.get()).insert(current_entity);
                             (*next_thread).state = ThreadState::Running;
                             CURRENT_THREAD = next_thread;
+                            CURRENT_THREAD_IS_CFS = true;
                         } else {
-                            (*CFS_RUN_QUEUE.get())
-                                .insert(ptr::addr_of_mut!((*next_thread).sched_entity));
+                            (*CFS_RUN_QUEUE.get()).insert(next_entity as *mut SchedEntity);
                         }
-                    } else if (*CURRENT_THREAD).thread_type == ThreadType::Rt {
+                    } else {
                         (*CURRENT_THREAD).state = ThreadState::Ready;
                         (*next_thread).state = ThreadState::Running;
                         CURRENT_THREAD = next_thread;
+                        CURRENT_THREAD_IS_CFS = true;
                     }
                 }
             } else if (*next_ktimer).timer_type() == KTimerType::Rt {
@@ -374,14 +405,15 @@ extern "C" fn schedule() {
                     return;
                 }
 
-                if (*CURRENT_THREAD).thread_type == ThreadType::Cfs {
+                if CURRENT_THREAD_IS_CFS {
                     (*CURRENT_THREAD).state = ThreadState::Ready;
-                    (*CFS_RUN_QUEUE.get())
-                        .insert(ptr::addr_of_mut!((*CURRENT_THREAD).sched_entity));
+                    (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD));
                     (*next_thread).state = ThreadState::Running;
                     CURRENT_THREAD = next_thread;
-                } else if (*CURRENT_THREAD).thread_type == ThreadType::Rt {
+                    CURRENT_THREAD_IS_CFS = false;
+                } else {
                     CURRENT_THREAD = next_thread;
+                    CURRENT_THREAD_IS_CFS = false;
                 }
             }
         }
@@ -405,13 +437,5 @@ pub fn handle_systick() {
 
     if !next_ktimer.is_null() {
         SCB::set_pendsv();
-    }
-}
-
-unsafe fn thread_from_sched_entity(entity: *mut SchedEntity) -> *mut Thread {
-    unsafe {
-        (entity as *mut u8)
-            .sub(offset_of!(Thread, sched_entity))
-            .cast::<Thread>()
     }
 }
