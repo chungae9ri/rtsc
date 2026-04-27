@@ -164,6 +164,30 @@ pub(crate) fn next_ktimer() -> *mut KTimerEntity {
     unsafe { NEXT_KTIMER }
 }
 
+pub(crate) fn first_ktimer() -> *mut KTimerEntity {
+    unsafe { (*KTIMER_QUEUE.get()).first() }
+}
+
+pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut Thread) -> bool {
+    unsafe {
+        let queue = &mut *KTIMER_QUEUE.get();
+        let mut entity = queue.first();
+
+        while !entity.is_null() {
+            let next = queue.next(entity);
+            if (*entity).timer_type() == KTimerType::Rt && (*entity).thread() == thread {
+                queue.remove(entity);
+                (*entity).set_deadline((*entity).duration());
+                queue.insert(entity);
+                return true;
+            }
+            entity = next;
+        }
+
+        false
+    }
+}
+
 pub(crate) fn program_next_systick() -> Option<u32> {
     let reload = next_ktimer_reload()?;
 
