@@ -8,10 +8,10 @@ use core::ptr;
 
 use cortex_m::peripheral::SCB;
 
-use crate::ktimer::update_next_ktimer;
+use crate::ktimer::{first_ktimer, reset_rt_ktimer_deadline, update_next_ktimer};
 use crate::sched::{
-    CFS_RUN_QUEUE, CFS_TIMER_ENTITY, CURRENT_THREAD, CURRENT_THREAD_IS_CFS, SchedEntity,
-    enqueue_thread, thread_is_cfs,
+    CFS_RUN_QUEUE, CURRENT_THREAD, CURRENT_THREAD_IS_CFS, SchedEntity, enqueue_thread,
+    thread_is_cfs,
 };
 
 /// Global counter for assigning unique thread IDs. Accessed only
@@ -241,6 +241,21 @@ pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *
     unsafe { ptr::addr_of_mut!((*cfs_thread).thread) }
 }
 
+/// Set the current RT thread's ktimer deadline back to its duration.
+///
+/// Returns `true` when the current thread is RT and has an RT ktimer in the
+/// ktimer queue. Returns `false` before a current thread exists, for CFS
+/// threads, or when no RT ktimer is associated with the current thread.
+pub fn reset_current_rt_deadline() -> bool {
+    unsafe {
+        if CURRENT_THREAD.is_null() || CURRENT_THREAD_IS_CFS {
+            return false;
+        }
+
+        reset_rt_ktimer_deadline(CURRENT_THREAD)
+    }
+}
+
 /// Cooperatively yield the CPU from the running RT thread to the left-most CFS thread.
 ///
 /// This is intended for application RT threads that have completed their current
@@ -256,7 +271,8 @@ pub fn yieldyi() {
             return;
         }
 
-        update_next_ktimer(ptr::addr_of_mut!(CFS_TIMER_ENTITY));
+        reset_current_rt_deadline();
+        update_next_ktimer(first_ktimer());
         SCB::set_pendsv();
     }
 }

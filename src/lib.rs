@@ -10,7 +10,8 @@ mod thread;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
-    AlignedStack, CfsThread, RtThread, Thread, ThreadControlBlock, ThreadState, forkyi, yieldyi,
+    AlignedStack, CfsThread, RtThread, Thread, ThreadControlBlock, ThreadState, forkyi,
+    reset_current_rt_deadline, yieldyi,
 };
 
 pub use ktimer::{
