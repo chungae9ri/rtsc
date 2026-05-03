@@ -6,9 +6,12 @@
 use core::mem::offset_of;
 use core::ptr;
 
-use cortex_m::peripheral::SCB;
+use cortex_m::{interrupt, peripheral::SCB};
 
-use crate::ktimer::{first_ktimer, reset_rt_ktimer_deadline, update_next_ktimer};
+use crate::ktimer::{
+    elapsed_ticks_since_current_reload, reset_rt_ktimer_deadline, update_next_ktimer_to_first,
+    yield_rt_ktimer,
+};
 use crate::sched::{
     CFS_RUN_QUEUE, CURRENT_THREAD, CURRENT_THREAD_IS_CFS, SchedEntity, enqueue_thread,
     thread_is_cfs,
@@ -263,7 +266,7 @@ pub fn reset_current_rt_deadline() -> bool {
 /// Calling this from a non-RT thread, before a current thread exists, or when no
 /// CFS thread is runnable is a no-op.
 pub fn yieldyi() {
-    unsafe {
+    interrupt::free(|_| unsafe {
         if CURRENT_THREAD.is_null()
             || CURRENT_THREAD_IS_CFS
             || (*CFS_RUN_QUEUE.get()).first().is_null()
@@ -271,8 +274,10 @@ pub fn yieldyi() {
             return;
         }
 
-        reset_current_rt_deadline();
-        update_next_ktimer(first_ktimer());
+        let elapsed = elapsed_ticks_since_current_reload();
+        yield_rt_ktimer(CURRENT_THREAD, elapsed);
+        update_next_ktimer_to_first();
+
         SCB::set_pendsv();
-    }
+    });
 }

@@ -285,6 +285,27 @@ pub unsafe fn dequeue_thread(thread: *mut Thread) {
 
 // Switch to the first thread which was set up by `forkyi`.
 // This is typically called at the end of `main`.
+// NOTE: Assembly below relies on the `Thread` layout defined in
+// `rtsc/src/thread.rs` where `Thread.sp` is the first field (offset 0)
+// and `Thread.exc_return` is the second field (offset 4). The save/restore
+// sequence performed by PendSV/SVCall does NOT copy callee-saved registers
+// into the `Thread.callee_saved_regs` struct field; instead it pushes r4-r11
+// onto the thread's stack and stores the stack pointer into `Thread.sp`.
+//
+// Stack frame expectations produced by `forkyi`:
+// - The synthetic thread entry frame left for exception return contains
+//   (from low to high addresses): r4..r11 (pushed by PendSV), then the
+//   standard hardware frame consumed by EXC_RETURN: r0, r1, r2, r3, r12, lr,
+//   pc, xPSR. `Thread.sp` points at the saved r4..r11 block (the full saved
+//   context begins at this pointer when restoring).
+//
+// Offsets used by the assembly:
+// - `str r0, [r2]`   -> stores saved SP into `Thread.sp` (offset 0)
+// - `str lr, [r2, #4]`-> stores EXC_RETURN into `Thread.exc_return` (offset 4)
+//
+// If you intend `Thread.callee_saved_regs` to mirror the saved r4..r11
+// words, either update the assembly to store into that struct region or
+// remove/ignore the `callee_saved_regs` field to avoid confusion.
 global_asm!(
     ".section .text.SVCall,\"ax\",%progbits",
     ".global SVCall",
@@ -412,6 +433,8 @@ extern "C" fn schedule() {
                     CURRENT_THREAD = next_thread;
                     CURRENT_THREAD_IS_CFS = false;
                 } else {
+                    (*CURRENT_THREAD).state = ThreadState::Ready;
+                    (*next_thread).state = ThreadState::Running;
                     CURRENT_THREAD = next_thread;
                     CURRENT_THREAD_IS_CFS = false;
                 }
