@@ -286,7 +286,7 @@ pub unsafe fn dequeue_thread(thread: *mut Thread) {
 // Switch to the first thread which was set up by `forkyi`.
 // This is typically called at the end of `main`.
 // NOTE: Assembly below relies on the `Thread` layout defined in
-// `rtsc/src/thread.rs` where `Thread.sp` is the first field (offset 0)
+// `rtsched/src/thread.rs` where `Thread.sp` is the first field (offset 0)
 // and `Thread.exc_return` is the second field (offset 4). The save/restore
 // sequence performed by PendSV/SVCall does NOT copy callee-saved registers
 // into the `Thread.callee_saved_regs` struct field; instead it pushes r4-r11
