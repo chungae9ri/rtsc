@@ -12,6 +12,3 @@ bench = false
 
 [dependencies]
 cortex-m = "0.7.7"
-cortex-m-rt = "0.6.15"
-panic-halt = "1.0.0"
-rtt-target = "0.6"
