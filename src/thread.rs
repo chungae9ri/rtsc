@@ -37,42 +37,15 @@ pub enum ThreadState {
     Suspended,
 }
 
-/// Registers that must be preserved across a context switch on Cortex-M.
-///
-/// These are the callee-saved general-purpose registers under the ARM ABI.
-/// A PendSV context switch routine typically stores and restores this set
-/// around thread transitions.
-#[repr(C)]
-pub struct CalleeSavedRegisters {
-    /// Saved value of register r4.
-    pub r4: u32,
-    /// Saved value of register r5.
-    pub r5: u32,
-    /// Saved value of register r6.
-    pub r6: u32,
-    /// Saved value of register r7.
-    pub r7: u32,
-    /// Saved value of register r8.
-    pub r8: u32,
-    /// Saved value of register r9.
-    pub r9: u32,
-    /// Saved value of register r10.
-    pub r10: u32,
-    /// Saved value of register r11.
-    pub r11: u32,
-}
-
 /// 8-byte aligned stack storage for Cortex-M thread contexts.
 #[repr(align(8))]
 pub struct AlignedStack<const N: usize>(pub [u32; N]);
 
 /// Common scheduler-visible thread context.
 ///
-/// `sp` points at the saved stack frame used when restoring the thread. When
-/// `exc_return` records whether that saved frame belongs to MSP or PSP, and
-/// real context switching is added, the layout implied by `sp`,
-/// `exc_return`, and
-/// `callee_saved_regs` should be documented alongside the save/restore code.
+/// `sp` points at the saved stack frame used when restoring the thread.
+/// `exc_return` records whether that saved frame belongs to MSP or PSP and
+/// whether an FPU exception frame is active.
 #[repr(C)]
 pub struct Thread {
     /// Stack pointer captured for the next restore of this thread.
@@ -87,8 +60,6 @@ pub struct Thread {
     pub name: &'static str,
     /// Current lifecycle state used by the scheduler.
     pub state: ThreadState,
-    /// Software view of the callee-saved register set for this thread.
-    pub callee_saved_regs: CalleeSavedRegisters,
 }
 
 impl Thread {
@@ -173,6 +144,10 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
     // PSP, exception return consumes a standard hardware frame:
     // r0, r1, r2, r3, r12, lr, pc, xpsr.
+    //
+    // The initial EXC_RETURN value has bit 4 set, so no floating-point context
+    // is restored until the thread actually uses the FPU and hardware records
+    // an extended exception frame.
     unsafe {
         // Exception return requires an 8-byte aligned stack.
         sp = ((sp as usize) & !0x7) as *mut u32;
@@ -209,16 +184,6 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
             id,
             name,
             state: ThreadState::Ready,
-            callee_saved_regs: CalleeSavedRegisters {
-                r4: 0,
-                r5: 0,
-                r6: 0,
-                r7: 0,
-                r8: 0,
-                r9: 0,
-                r10: 0,
-                r11: 0,
-            },
         };
         T::init(thread, common, priority)
     }
