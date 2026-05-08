@@ -13,8 +13,7 @@ use crate::ktimer::{
     yield_rt_ktimer,
 };
 use crate::sched::{
-    CFS_RUN_QUEUE, CURRENT_THREAD, CURRENT_THREAD_IS_CFS, SchedEntity, enqueue_thread,
-    thread_is_cfs,
+    CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS, SchedEntity, enqueue_thread, thread_is_cfs,
 };
 
 /// Global counter for assigning unique thread IDs. Accessed only
@@ -47,7 +46,7 @@ pub struct AlignedStack<const N: usize>(pub [u32; N]);
 /// `exc_return` records whether that saved frame belongs to MSP or PSP and
 /// whether an FPU exception frame is active.
 #[repr(C)]
-pub struct Thread {
+pub struct ThreadCtx {
     /// Stack pointer captured for the next restore of this thread.
     /// Stack pointer should be always placed in the first field.
     pub sp: u32,
@@ -62,11 +61,11 @@ pub struct Thread {
     pub state: ThreadState,
 }
 
-impl Thread {
+impl ThreadCtx {
     /// Return the CFS scheduling entity for this thread, when this is a CFS thread.
     pub fn sched_entity(&self) -> Option<&SchedEntity> {
-        if thread_is_cfs(self as *const Thread) {
-            Some(unsafe { &*cfs_sched_entity(self as *const Thread as *mut Thread) })
+        if thread_is_cfs(self as *const ThreadCtx) {
+            Some(unsafe { &*cfs_sched_entity(self as *const ThreadCtx as *mut ThreadCtx) })
         } else {
             None
         }
@@ -77,8 +76,8 @@ impl Thread {
 #[repr(C)]
 pub struct CfsThread {
     /// Common context. This must remain the first field because assembly and
-    /// timer code use `*mut Thread` as the shared thin pointer type.
-    pub thread: Thread,
+    /// timer code use `*mut ThreadCtx` as the shared thin pointer type.
+    pub thread: ThreadCtx,
     /// Scheduler entity used for CFS run-queue ordering.
     pub sched_entity: SchedEntity,
 }
@@ -87,8 +86,9 @@ pub struct CfsThread {
 #[repr(C)]
 pub struct RtThread {
     /// Common context. This must remain the first field because assembly and
-    /// timer code use `*mut Thread` as the shared thin pointer type.
-    pub thread: Thread,
+    /// timer code use `*mut ThreadCtx` as the shared thin pointer type.
+    pub thread: ThreadCtx,
+    pub runtime: u32,
 }
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
@@ -100,13 +100,13 @@ pub trait ThreadControlBlock {
     /// # Safety
     ///
     /// `thread` must point to valid writable storage for `Self`.
-    unsafe fn init(thread: *mut Self, common: Thread, priority: u32) -> *mut Thread;
+    unsafe fn init(thread: *mut Self, common: ThreadCtx, priority: u32) -> *mut ThreadCtx;
 }
 
 impl ThreadControlBlock for CfsThread {
     const IS_CFS: bool = true;
 
-    unsafe fn init(thread: *mut Self, common: Thread, priority: u32) -> *mut Thread {
+    unsafe fn init(thread: *mut Self, common: ThreadCtx, priority: u32) -> *mut ThreadCtx {
         unsafe {
             ptr::write(
                 thread,
@@ -125,9 +125,15 @@ impl ThreadControlBlock for CfsThread {
 impl ThreadControlBlock for RtThread {
     const IS_CFS: bool = false;
 
-    unsafe fn init(thread: *mut Self, common: Thread, _priority: u32) -> *mut Thread {
+    unsafe fn init(thread: *mut Self, common: ThreadCtx, _priority: u32) -> *mut ThreadCtx {
         unsafe {
-            ptr::write(thread, RtThread { thread: common });
+            ptr::write(
+                thread,
+                RtThread {
+                    thread: common,
+                    runtime: 0,
+                },
+            );
             ptr::addr_of_mut!((*thread).thread)
         }
     }
@@ -140,7 +146,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     arg: *mut core::ffi::c_void,
     name: &'static str,
     priority: u32,
-) -> *mut Thread {
+) -> *mut ThreadCtx {
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
     // PSP, exception return consumes a standard hardware frame:
     // r0, r1, r2, r3, r12, lr, pc, xpsr.
@@ -178,7 +184,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
         }
         let id = NEXT_THREAD_ID;
         NEXT_THREAD_ID = NEXT_THREAD_ID.wrapping_add(1);
-        let common = Thread {
+        let common = ThreadCtx {
             sp: sp as u32,
             exc_return: 0xFFFF_FFFD,
             id,
@@ -189,7 +195,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     }
 }
 
-pub(crate) unsafe fn cfs_sched_entity(thread: *mut Thread) -> *mut SchedEntity {
+pub(crate) unsafe fn cfs_sched_entity(thread: *mut ThreadCtx) -> *mut SchedEntity {
     debug_assert!(!thread.is_null());
 
     let cfs_thread = (thread as *mut u8)
@@ -199,7 +205,7 @@ pub(crate) unsafe fn cfs_sched_entity(thread: *mut Thread) -> *mut SchedEntity {
     unsafe { ptr::addr_of_mut!((*cfs_thread).sched_entity) }
 }
 
-pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *mut Thread {
+pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *mut ThreadCtx {
     debug_assert!(!entity.is_null());
 
     let cfs_thread = (entity as *mut u8)
@@ -209,6 +215,14 @@ pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *
     unsafe { ptr::addr_of_mut!((*cfs_thread).thread) }
 }
 
+unsafe fn rt_thread_from_thread(thread: *mut ThreadCtx) -> *mut RtThread {
+    debug_assert!(!thread.is_null());
+
+    (thread as *mut u8)
+        .wrapping_sub(offset_of!(RtThread, thread))
+        .cast::<RtThread>()
+}
+
 /// Set the current RT thread's ktimer deadline back to its duration.
 ///
 /// Returns `true` when the current thread is RT and has an RT ktimer in the
@@ -216,31 +230,30 @@ pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *
 /// threads, or when no RT ktimer is associated with the current thread.
 pub fn reset_current_rt_deadline() -> bool {
     unsafe {
-        if CURRENT_THREAD.is_null() || CURRENT_THREAD_IS_CFS {
+        if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
             return false;
         }
 
-        reset_rt_ktimer_deadline(CURRENT_THREAD)
+        reset_rt_ktimer_deadline(CURRENT_THREAD_CTX)
     }
 }
 
-/// Cooperatively yield the CPU from the running RT thread to the left-most CFS thread.
+/// Cooperatively yield the CPU from the running RT thread to the
+/// next scheduled left-most timer in the KTimer rbtree.
 ///
-/// This is intended for application RT threads that have completed their current
-/// job and want to give CFS work a chance to run before the next RT release.
-/// Calling this from a non-RT thread, before a current thread exists, or when no
-/// CFS thread is runnable is a no-op.
+/// This is intended for RT threads that have completed their current
+/// job and want to give a chance to next scheduled thread (either CFS or RT).
+/// Calling this from a non-RT thread is a no-op.
 pub fn yieldyi() {
     interrupt::free(|_| unsafe {
-        if CURRENT_THREAD.is_null()
-            || CURRENT_THREAD_IS_CFS
-            || (*CFS_RUN_QUEUE.get()).first().is_null()
-        {
+        if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
             return;
         }
 
         let elapsed = elapsed_ticks_since_current_reload();
-        yield_rt_ktimer(CURRENT_THREAD, elapsed);
+        let current_rt_thread = rt_thread_from_thread(CURRENT_THREAD_CTX);
+        (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
+        yield_rt_ktimer(CURRENT_THREAD_CTX, elapsed);
         update_next_ktimer_to_first();
 
         SCB::set_pendsv();
