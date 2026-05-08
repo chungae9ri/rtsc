@@ -16,18 +16,18 @@ use crate::ktimer::{
 };
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{
-    Thread, ThreadControlBlock, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
+    ThreadCtx, ThreadControlBlock, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
 };
 //use rtt_target::rprintln;
 
 pub(crate) static mut CFS_TIMER_ENTITY: KTimerEntity =
-    KTimerEntity::new(0, 0, KTimerType::Cfs, ptr::null_mut::<Thread>());
+    KTimerEntity::new(0, 0, KTimerType::Cfs, ptr::null_mut::<ThreadCtx>());
 pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
 #[unsafe(no_mangle)]
-pub static mut CURRENT_THREAD: *mut Thread = ptr::null_mut();
+pub static mut CURRENT_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 pub(crate) static mut CURRENT_THREAD_IS_CFS: bool = false;
 #[unsafe(no_mangle)]
-static mut START_THREAD_PTR: *mut Thread = ptr::null_mut();
+static mut START_THREAD_PTR: *mut ThreadCtx = ptr::null_mut();
 
 pub(crate) struct RunQueue {
     tree: UnsafeCell<RBTree<SchedEntity>>,
@@ -145,18 +145,18 @@ unsafe impl RBTreeNode for SchedEntity {
 
 pub unsafe fn init_current<T: ThreadControlBlock>(thread: *mut T) {
     unsafe {
-        CURRENT_THREAD = thread.cast::<Thread>();
+        CURRENT_THREAD_CTX = thread.cast::<ThreadCtx>();
         CURRENT_THREAD_IS_CFS = T::IS_CFS;
     }
 }
 
-pub(crate) fn thread_is_cfs(thread: *const Thread) -> bool {
+pub(crate) fn thread_is_cfs(thread: *const ThreadCtx) -> bool {
     if thread.is_null() {
         return false;
     }
 
     unsafe {
-        if thread == CURRENT_THREAD.cast_const() {
+        if thread == CURRENT_THREAD_CTX.cast_const() {
             return CURRENT_THREAD_IS_CFS;
         }
 
@@ -175,7 +175,7 @@ pub(crate) fn thread_is_cfs(thread: *const Thread) -> bool {
 
 /// Traverse the scheduler-visible threads, including the running thread.
 ///
-/// Pass `None` to get the CURRENT_THREAD running thread when one exists; otherwise
+/// Pass `None` to get the CURRENT_THREAD_CTX running thread when one exists; otherwise
 /// this returns the first queued thread. Pass the previously returned thread to
 /// get the next entry. After the running thread, traversal continues through
 /// the run queue in ascending vruntime order. Returns `None` after the last
@@ -186,13 +186,13 @@ pub(crate) fn thread_is_cfs(thread: *const Thread) -> bool {
 /// The caller must ensure that any provided thread pointer still refers to a
 /// valid thread control block and that the run queue is not concurrently
 /// mutated in a way that invalidates the traversal step.
-pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thread> {
+pub unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
     unsafe {
         let tree = &*CFS_RUN_QUEUE.get();
         match cursor {
             None => {
-                if !CURRENT_THREAD.is_null() {
-                    Some(CURRENT_THREAD)
+                if !CURRENT_THREAD_CTX.is_null() {
+                    Some(CURRENT_THREAD_CTX)
                 } else {
                     let first = tree.first();
                     if first.is_null() {
@@ -202,7 +202,7 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thr
                     }
                 }
             }
-            Some(thread) if thread == CURRENT_THREAD => {
+            Some(thread) if thread == CURRENT_THREAD_CTX => {
                 let first = tree.first();
                 if first.is_null() {
                     None
@@ -228,7 +228,7 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut Thread>) -> Option<*mut Thr
 /// same synthetic frame layout produced by `forkyi`. The actual exception
 /// return happens in `SVCall`, because `EXC_RETURN` is only valid from
 /// handler mode.
-pub unsafe fn spawn_main_thread(thread: *mut Thread) -> ! {
+pub unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
     unsafe {
         (*CFS_RUN_QUEUE.get()).remove(cfs_sched_entity(thread));
         (*thread).state = ThreadState::Running;
@@ -254,7 +254,7 @@ pub unsafe fn init_cfs(ticks: u32) {
     unsafe {
         init_cfs_rq();
         CFS_TIMER_ENTITY =
-            KTimerEntity::new(ticks, ticks, KTimerType::Cfs, ptr::null_mut::<Thread>());
+            KTimerEntity::new(ticks, ticks, KTimerType::Cfs, ptr::null_mut::<ThreadCtx>());
         enqueue_ktimer(ptr::addr_of_mut!(CFS_TIMER_ENTITY));
     }
 }
@@ -262,7 +262,7 @@ pub unsafe fn init_cfs(ticks: u32) {
 /// Enqueue a thread into the scheduler run queue.
 ///
 /// The thread's scheduler entity vruntime field is used as the red-black tree key.
-pub unsafe fn enqueue_thread(thread: *mut Thread) {
+pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
     unsafe {
         (*thread).state = ThreadState::Ready;
         let entity = cfs_sched_entity(thread);
@@ -273,7 +273,7 @@ pub unsafe fn enqueue_thread(thread: *mut Thread) {
 }
 
 /// Remove a thread from the scheduler run queue if it is currently queued.
-pub unsafe fn dequeue_thread(thread: *mut Thread) {
+pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
     unsafe {
         if (*thread).state == ThreadState::Ready {
             let entity = cfs_sched_entity(thread);
@@ -285,26 +285,26 @@ pub unsafe fn dequeue_thread(thread: *mut Thread) {
 
 // Switch to the first thread which was set up by `forkyi`.
 // This is typically called at the end of `main`.
-// NOTE: Assembly below relies on the `Thread` layout defined in
-// `rtsched/src/thread.rs` where `Thread.sp` is the first field (offset 0)
-// and `Thread.exc_return` is the second field (offset 4). The save/restore
+// NOTE: Assembly below relies on the `ThreadCtx` layout defined in
+// `rtsched/src/thread.rs` where `ThreadCtx.sp` is the first field (offset 0)
+// and `ThreadCtx.exc_return` is the second field (offset 4). The save/restore
 // sequence performed by PendSV/SVCall pushes r4-r11 and, when EXC_RETURN bit 4
 // indicates an active FP context, s16-s31 onto the thread's stack and stores
-// the stack pointer into `Thread.sp`.
+// the stack pointer into `ThreadCtx.sp`.
 //
 // Stack frame expectations produced by `forkyi`:
 // - The synthetic thread entry frame left for exception return contains
 //   (from low to high addresses): r4..r11 (pushed by PendSV), then the
 //   standard hardware frame consumed by EXC_RETURN: r0, r1, r2, r3, r12, lr,
-//   pc, xPSR. `Thread.sp` points at the saved r4..r11 block (the full saved
+//   pc, xPSR. `ThreadCtx.sp` points at the saved r4..r11 block (the full saved
 //   context begins at this pointer when restoring).
 // - Threads that use the FPU also carry an extended hardware exception frame
 //   for s0-s15/FPSCR and a software-saved s16-s31 block immediately above the
 //   r4-r11 block. EXC_RETURN bit 4 selects whether the s16-s31 block is present.
 //
 // Offsets used by the assembly:
-// - `str r0, [r2]`   -> stores saved SP into `Thread.sp` (offset 0)
-// - `str lr, [r2, #4]`-> stores EXC_RETURN into `Thread.exc_return` (offset 4)
+// - `str r0, [r2]`   -> stores saved SP into `ThreadCtx.sp` (offset 0)
+// - `str lr, [r2, #4]`-> stores EXC_RETURN into `ThreadCtx.exc_return` (offset 4)
 global_asm!(
     ".section .text.SVCall,\"ax\",%progbits",
     ".global SVCall",
@@ -312,8 +312,8 @@ global_asm!(
     "SVCall:",
     "ldr r0, =START_THREAD_PTR",
     "ldr r0, [r0]", // r0 = thread
-    "ldr r3, =CURRENT_THREAD",
-    "str r0, [r3]",          // CURRENT_THREAD = thread
+    "ldr r3, =CURRENT_THREAD_CTX",
+    "str r0, [r3]",          // CURRENT_THREAD_CTX = thread
     "ldr r1, [r0]",          // r1 = thread->sp
     "ldr lr, [r0, #4]",      // lr = thread->exc_return
     "ldmia r1!, {{r4-r11}}", // restore callee-saved registers
@@ -327,7 +327,7 @@ global_asm!(
 
 // PendSV handler used for context switching between threads.
 // The actual context switch happens in the assembly code, but the scheduler is
-// called from here to select the next thread to run and update `CURRENT_THREAD`.
+// called from here to select the next thread to run and update `CURRENT_THREAD_CTX`.
 // Threads are expected to have their stack frames (PSP) prepared by `forkyi` so that the
 // assembly code can save and restore them without needing to understand the layout.
 global_asm!(
@@ -343,12 +343,12 @@ global_asm!(
     "it eq",
     "vstmdbeq r0!, {{s16-s31}}", // Save callee-saved FP registers when present.
     "stmdb r0!, {{r4-r11}}",   // Save callee-saved core registers on the thread stack.
-    "ldr r1, =CURRENT_THREAD", // R1 = &CURRENT_THREAD
-    "ldr r2, [r1]",            // R2 = CURRENT_THREAD thread pointer
+    "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
+    "ldr r2, [r1]",            // R2 = CURRENT_THREAD_CTX thread pointer
     "str r0, [r2]",            // Save updated stack pointer into the thread control block.
     "str lr, [r2, #4]",        // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
-    "bl schedule",             // Run the CURRENT_THREAD ktimer handler and update CURRENT_THREAD.
-    "ldr r1, =CURRENT_THREAD", // R1 = &CURRENT_THREAD
+    "bl schedule",             // Run the CURRENT_THREAD_CTX ktimer handler and update CURRENT_THREAD_CTX.
+    "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
     "ldr r2, [r1]",            // R2 = next thread pointer
     "ldr r0, [r2]",            // R0 = next thread's saved SP
     "ldr lr, [r2, #4]",        // LR = next thread's saved EXC_RETURN
@@ -373,20 +373,20 @@ extern "C" fn schedule() {
         }
 
         // The scheduler logic is as follows:
-        // - If the CURRENT_THREAD is CFS, update its vruntime based on the elapsed
+        // - If the CURRENT_THREAD_CTX is CFS, update its vruntime based on the elapsed
         //   ticks and its priority.
         // - If the next expired ktimer is for a CFS thread and current thread is
-        //   CFS thread, compare its vruntime with the CURRENT_THREAD's vruntime
+        //   CFS thread, compare its vruntime with the CURRENT_THREAD_CTX's vruntime
         //   to decide whether to preempt.
         // - If the next expired ktimer is for a CFS thread and current thread is
         //   RT thread, switch to the left-most CFS thread.
         // - If the next expired ktimer is for an RT thread and current thread is
         //   CFS thread, insert current to CFS runq and switch to next RT thread.
         // - If the next expired ktimer is for an RT thread and current thread is
-        //   RT thread,preempt the CURRENT_THREAD with next RT thread.
-        if !CURRENT_THREAD.is_null() && (*CURRENT_THREAD).state == ThreadState::Running {
+        //   RT thread,preempt the CURRENT_THREAD_CTX with next RT thread.
+        if !CURRENT_THREAD_CTX.is_null() && (*CURRENT_THREAD_CTX).state == ThreadState::Running {
             if CURRENT_THREAD_IS_CFS {
-                let current_entity = cfs_sched_entity(CURRENT_THREAD);
+                let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
                 (*current_entity).sched_tick_cnt += u64::from(elapsed_ticks_since_last_interrupt());
                 let priority_sum = *CFS_RUN_QUEUE.priority_sum();
                 if priority_sum == 0 {
@@ -404,24 +404,24 @@ extern "C" fn schedule() {
                     let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
 
                     if CURRENT_THREAD_IS_CFS {
-                        let current_entity = cfs_sched_entity(CURRENT_THREAD);
+                        let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
                         debug_assert!(
-                            CURRENT_THREAD != next_thread,
-                            "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD running thread"
+                            CURRENT_THREAD_CTX != next_thread,
+                            "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD_CTX running thread"
                         );
                         if (*current_entity).vruntime > (*next_entity).vruntime {
-                            (*CURRENT_THREAD).state = ThreadState::Ready;
+                            (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
                             (*CFS_RUN_QUEUE.get()).insert(current_entity);
                             (*next_thread).state = ThreadState::Running;
-                            CURRENT_THREAD = next_thread;
+                            CURRENT_THREAD_CTX = next_thread;
                             CURRENT_THREAD_IS_CFS = true;
                         } else {
                             (*CFS_RUN_QUEUE.get()).insert(next_entity as *mut SchedEntity);
                         }
                     } else {
-                        (*CURRENT_THREAD).state = ThreadState::Ready;
+                        (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
                         (*next_thread).state = ThreadState::Running;
-                        CURRENT_THREAD = next_thread;
+                        CURRENT_THREAD_CTX = next_thread;
                         CURRENT_THREAD_IS_CFS = true;
                     }
                 }
@@ -432,15 +432,15 @@ extern "C" fn schedule() {
                 }
 
                 if CURRENT_THREAD_IS_CFS {
-                    (*CURRENT_THREAD).state = ThreadState::Ready;
-                    (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD));
+                    (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+                    (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD_CTX));
                     (*next_thread).state = ThreadState::Running;
-                    CURRENT_THREAD = next_thread;
+                    CURRENT_THREAD_CTX = next_thread;
                     CURRENT_THREAD_IS_CFS = false;
                 } else {
-                    (*CURRENT_THREAD).state = ThreadState::Ready;
+                    (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
                     (*next_thread).state = ThreadState::Running;
-                    CURRENT_THREAD = next_thread;
+                    CURRENT_THREAD_CTX = next_thread;
                     CURRENT_THREAD_IS_CFS = false;
                 }
             }

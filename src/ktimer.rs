@@ -13,7 +13,7 @@ use core::ptr;
 use cortex_m::{interrupt, peripheral::SYST};
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
-use crate::thread::Thread;
+use crate::thread::ThreadCtx;
 
 pub const SYSTICK_RELOAD_MAX: u32 = 0x00FF_FFFF;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
@@ -49,7 +49,7 @@ pub struct KTimerEntity {
     duration: u32,
     deadline: u32,
     timer_type: KTimerType,
-    thread: *mut Thread,
+    thread: *mut ThreadCtx,
     node: RbNode,
 }
 
@@ -58,7 +58,7 @@ impl KTimerEntity {
         duration: u32,
         deadline: u32,
         timer_type: KTimerType,
-        thread: *mut Thread,
+        thread: *mut ThreadCtx,
     ) -> Self {
         Self {
             duration,
@@ -89,15 +89,15 @@ impl KTimerEntity {
         self.timer_type = timer_type;
     }
 
-    pub fn thread(&self) -> *mut Thread {
+    pub fn thread(&self) -> *mut ThreadCtx {
         self.thread
     }
 
-    pub fn init_thread(&mut self, thread: *mut Thread) {
+    pub fn init_thread(&mut self, thread: *mut ThreadCtx) {
         self.thread = thread;
     }
 
-    pub fn set_thread(&mut self, thread: *mut Thread) {
+    pub fn set_thread(&mut self, thread: *mut ThreadCtx) {
         self.init_thread(thread);
     }
 
@@ -174,7 +174,7 @@ pub(crate) fn update_next_ktimer_to_first() {
     });
 }
 
-pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut Thread) -> bool {
+pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut ThreadCtx) -> bool {
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
         let mut entity = queue.first();
@@ -194,7 +194,7 @@ pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut Thread) -> bool {
     })
 }
 
-pub(crate) unsafe fn yield_rt_ktimer(thread: *mut Thread, elapsed: u32) -> bool {
+pub(crate) unsafe fn yield_rt_ktimer(thread: *mut ThreadCtx, elapsed: u32) -> bool {
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
         let Some(entity) = queue.pop_first() else {
