@@ -460,6 +460,7 @@ pub fn handle_systick() {
     };
 
     unsafe {
+        (*next_ktimer).set_active(true);
         update_next_ktimer(next_ktimer);
     }
 

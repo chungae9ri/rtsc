@@ -43,6 +43,7 @@ pub struct KTimerEntity {
     duration: u32,
     deadline: u32,
     node: RbNode,
+    active: bool,
 }
 
 impl KTimerEntity {
@@ -51,6 +52,7 @@ impl KTimerEntity {
             duration,
             deadline: duration,
             node: RbNode::new(),
+            active: true,
         }
     }
 
@@ -72,6 +74,14 @@ impl KTimerEntity {
 
     pub fn is_linked(&self) -> bool {
         self.node.is_linked()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
     }
 
     pub unsafe fn rt_ktimer(entity: *mut Self) -> *mut RtKTimer {
@@ -242,6 +252,7 @@ pub(crate) unsafe fn yield_rt_ktimer(thread: *mut ThreadCtx, elapsed: u32) -> *m
         }
 
         (*entity).set_deadline((*entity).duration().saturating_sub(elapsed));
+        (*entity).set_active(false);
         queue.advance(elapsed);
         queue.insert(entity);
         let next = queue.first_active();
@@ -377,6 +388,7 @@ impl KTimerQueue {
 
             let expired = expired as *mut KTimerEntity;
             (*expired).deadline = (*expired).duration();
+            (*expired).set_active(true);
             self.insert(expired);
             self.first()
         }
@@ -404,6 +416,18 @@ impl KTimerQueue {
     /// Remove and return the earliest ktimer entity in the queue.
     pub unsafe fn pop_first(&mut self) -> Option<&mut KTimerEntity> {
         unsafe { self.tree.pop_first() }
+    }
+
+    pub fn first_active(&self) -> *mut KTimerEntity {
+        let mut entity = self.first();
+        while !entity.is_null() {
+            if unsafe { (*entity).is_active() } {
+                return entity;
+            }
+            entity = self.next(entity);
+        }
+
+        ptr::null_mut()
     }
 }
 
