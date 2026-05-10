@@ -9,8 +9,7 @@ use core::ptr;
 use cortex_m::{interrupt, peripheral::SCB};
 
 use crate::ktimer::{
-    elapsed_ticks_since_current_reload, reset_rt_ktimer_deadline, update_next_ktimer,
-    yield_rt_ktimer,
+    elapsed_ticks_since_current_reload, reset_rt_ktimer_deadline, update_next_ktimer, yield_ktimer,
 };
 use crate::sched::{
     CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS, SchedEntity, enqueue_thread, thread_is_cfs,
@@ -246,14 +245,12 @@ pub fn reset_current_rt_deadline() -> bool {
 /// Calling this from a non-RT thread is a no-op.
 pub fn yieldyi() {
     interrupt::free(|_| unsafe {
-        if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
-            return;
-        }
-
         let elapsed = elapsed_ticks_since_current_reload();
-        let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
-        (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
-        let next_ktimer = yield_rt_ktimer(CURRENT_THREAD_CTX, elapsed);
+        if !CURRENT_THREAD_IS_CFS {
+            let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
+        }
+        let next_ktimer = yield_ktimer(elapsed);
         update_next_ktimer(next_ktimer);
 
         SCB::set_pendsv();

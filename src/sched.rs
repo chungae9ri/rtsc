@@ -17,6 +17,7 @@ use crate::ktimer::{
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{
     ThreadControlBlock, ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
+    yieldyi,
 };
 //use rtt_target::rprintln;
 
@@ -337,26 +338,26 @@ global_asm!(
     "PendSV:",
     "tst lr, #4", // Was the interrupted thread using PSP or MSP
     "ite eq",
-    "mrseq r0, msp",           // Thread used MSP.
-    "mrsne r0, psp",           // Thread used PSP.
-    "tst lr, #0x10",           // EXC_RETURN bit 4 clear means an FP context is active.
+    "mrseq r0, msp", // Thread used MSP.
+    "mrsne r0, psp", // Thread used PSP.
+    "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
     "it eq",
     "vstmdbeq r0!, {{s16-s31}}", // Save callee-saved FP registers when present.
-    "stmdb r0!, {{r4-r11}}",   // Save callee-saved core registers on the thread stack.
+    "stmdb r0!, {{r4-r11}}",     // Save callee-saved core registers on the thread stack.
     "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
-    "ldr r2, [r1]",            // R2 = CURRENT_THREAD_CTX thread pointer
-    "str r0, [r2]",            // Save updated stack pointer into the thread control block.
-    "str lr, [r2, #4]",        // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
-    "bl schedule",             // Run the CURRENT_THREAD_CTX ktimer handler and update CURRENT_THREAD_CTX.
+    "ldr r2, [r1]",              // R2 = CURRENT_THREAD_CTX thread pointer
+    "str r0, [r2]",              // Save updated stack pointer into the thread control block.
+    "str lr, [r2, #4]",          // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
+    "bl schedule", // Run the CURRENT_THREAD_CTX ktimer handler and update CURRENT_THREAD_CTX.
     "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
-    "ldr r2, [r1]",            // R2 = next thread pointer
-    "ldr r0, [r2]",            // R0 = next thread's saved SP
-    "ldr lr, [r2, #4]",        // LR = next thread's saved EXC_RETURN
-    "ldmia r0!, {{r4-r11}}",   // Restore callee-saved core registers for the selected thread.
-    "tst lr, #0x10",           // EXC_RETURN bit 4 clear means an FP context is active.
+    "ldr r2, [r1]", // R2 = next thread pointer
+    "ldr r0, [r2]", // R0 = next thread's saved SP
+    "ldr lr, [r2, #4]", // LR = next thread's saved EXC_RETURN
+    "ldmia r0!, {{r4-r11}}", // Restore callee-saved core registers for the selected thread.
+    "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
     "it eq",
     "vldmiaeq r0!, {{s16-s31}}", // Restore callee-saved FP registers when present.
-    "tst lr, #4",              // Does the next thread return using MSP or PSP?
+    "tst lr, #4",                // Does the next thread return using MSP or PSP?
     "ite eq",
     "msreq msp, r0", // Restore MSP-backed context.
     "msrne psp, r0", // Restore PSP-backed context.
@@ -454,13 +455,28 @@ extern "C" fn schedule() {
 pub fn handle_systick() {
     let elapsed = elapsed_ticks_since_last_interrupt();
 
+    unsafe {
+        if CURRENT_THREAD_IS_CFS {
+            let cfs_timer = ptr::addr_of_mut!(CFS_TIMER_ENTITY);
+            (*cfs_timer).add_runtime(elapsed - 1);
+            if (*cfs_timer).runtime() >= (*cfs_timer).execution_time() {
+                (*cfs_timer).reset_runtime();
+                yieldyi();
+                return;
+            }
+        }
+    }
+
     let next_ktimer = unsafe {
         advance_ktimers(elapsed);
         dispatch_expired_ktimer()
     };
 
     unsafe {
-        (*next_ktimer).set_active(true);
+        if !next_ktimer.is_null() {
+            (*next_ktimer).set_active(true);
+        }
+
         update_next_ktimer(next_ktimer);
     }
 
