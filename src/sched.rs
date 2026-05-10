@@ -10,18 +10,17 @@ use core::arch::asm;
 use cortex_m::peripheral::SCB;
 
 use crate::ktimer::{
-    KTimerEntity, KTimerType, advance_ktimers, dispatch_expired_ktimer,
-    elapsed_ticks_since_last_interrupt, enqueue_ktimer, next_ktimer, program_next_systick,
-    update_next_ktimer,
+    CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
+    elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
+    program_next_systick, register_cfs_ktimer, update_next_ktimer,
 };
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{
-    ThreadCtx, ThreadControlBlock, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
+    ThreadControlBlock, ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
 };
 //use rtt_target::rprintln;
 
-pub(crate) static mut CFS_TIMER_ENTITY: KTimerEntity =
-    KTimerEntity::new(0, 0, KTimerType::Cfs, ptr::null_mut::<ThreadCtx>());
+pub(crate) static mut CFS_TIMER_ENTITY: CfsKTimer = CfsKTimer::new(0, 0);
 pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
@@ -250,12 +249,13 @@ unsafe fn init_cfs_rq() {
 ///
 /// `ticks` is expressed in raw timer ticks because the board owns the clock
 /// configuration.
-pub unsafe fn init_cfs(ticks: u32) {
+pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     unsafe {
         init_cfs_rq();
-        CFS_TIMER_ENTITY =
-            KTimerEntity::new(ticks, ticks, KTimerType::Cfs, ptr::null_mut::<ThreadCtx>());
-        enqueue_ktimer(ptr::addr_of_mut!(CFS_TIMER_ENTITY));
+        CFS_TIMER_ENTITY = CfsKTimer::new(period_ticks, exec_ticks);
+        let cfs_ktimer = (*ptr::addr_of_mut!(CFS_TIMER_ENTITY)).entity_mut();
+        register_cfs_ktimer(cfs_ktimer);
+        enqueue_ktimer(cfs_ktimer);
     }
 }
 
@@ -399,7 +399,7 @@ extern "C" fn schedule() {
                 (*current_entity).vruntime = sched_tick_cnt * priority / priority_sum;
             }
 
-            if (*next_ktimer).timer_type() == KTimerType::Cfs {
+            if is_cfs_ktimer(next_ktimer) {
                 if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
                     let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
 
@@ -425,8 +425,8 @@ extern "C" fn schedule() {
                         CURRENT_THREAD_IS_CFS = true;
                     }
                 }
-            } else if (*next_ktimer).timer_type() == KTimerType::Rt {
-                let next_thread = (*next_ktimer).thread();
+            } else {
+                let next_thread = (*KTimerEntity::rt_ktimer(next_ktimer)).thread_ctx();
                 if next_thread.is_null() {
                     return;
                 }

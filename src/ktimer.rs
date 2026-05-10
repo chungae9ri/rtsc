@@ -18,6 +18,7 @@ use crate::thread::ThreadCtx;
 pub const SYSTICK_RELOAD_MAX: u32 = 0x00FF_FFFF;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
+static mut CFS_KTIMER_ENTITY: *mut KTimerEntity = ptr::null_mut();
 
 struct GlobalKTimerQueue {
     queue: UnsafeCell<KTimerQueue>,
@@ -38,33 +39,17 @@ impl GlobalKTimerQueue {
 unsafe impl Sync for GlobalKTimerQueue {}
 
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum KTimerType {
-    Cfs,
-    Rt,
-}
-
-#[repr(C)]
 pub struct KTimerEntity {
     duration: u32,
     deadline: u32,
-    timer_type: KTimerType,
-    thread: *mut ThreadCtx,
     node: RbNode,
 }
 
 impl KTimerEntity {
-    pub const fn new(
-        duration: u32,
-        deadline: u32,
-        timer_type: KTimerType,
-        thread: *mut ThreadCtx,
-    ) -> Self {
+    pub const fn new(duration: u32) -> Self {
         Self {
             duration,
-            deadline,
-            timer_type,
-            thread,
+            deadline: duration,
             node: RbNode::new(),
         }
     }
@@ -81,32 +66,71 @@ impl KTimerEntity {
         self.deadline = deadline;
     }
 
-    pub fn timer_type(&self) -> KTimerType {
-        self.timer_type
-    }
-
-    pub fn set_timer_type(&mut self, timer_type: KTimerType) {
-        self.timer_type = timer_type;
-    }
-
-    pub fn thread(&self) -> *mut ThreadCtx {
-        self.thread
-    }
-
-    pub fn init_thread(&mut self, thread: *mut ThreadCtx) {
-        self.thread = thread;
-    }
-
-    pub fn set_thread(&mut self, thread: *mut ThreadCtx) {
-        self.init_thread(thread);
-    }
-
     pub fn reset_links(&mut self) {
         self.node.reset_links();
     }
 
     pub fn is_linked(&self) -> bool {
         self.node.is_linked()
+    }
+
+    pub unsafe fn rt_ktimer(entity: *mut Self) -> *mut RtKTimer {
+        debug_assert!(!entity.is_null());
+        debug_assert!(!is_cfs_ktimer(entity));
+
+        (entity as *mut u8)
+            .wrapping_sub(offset_of!(RtKTimer, entity))
+            .cast::<RtKTimer>()
+    }
+}
+
+#[repr(C)]
+pub struct CfsKTimer {
+    pub entity: KTimerEntity,
+    pub execution_time: u32,
+}
+
+impl CfsKTimer {
+    pub const fn new(duration: u32, execution_time: u32) -> Self {
+        Self {
+            entity: KTimerEntity::new(duration),
+            execution_time: execution_time,
+        }
+    }
+
+    pub fn entity_mut(&mut self) -> *mut KTimerEntity {
+        ptr::addr_of_mut!(self.entity)
+    }
+}
+
+#[repr(C)]
+pub struct RtKTimer {
+    pub entity: KTimerEntity,
+    thread_ctx: *mut ThreadCtx,
+}
+
+impl RtKTimer {
+    pub const fn new(duration: u32, thread_ctx: *mut ThreadCtx) -> Self {
+        Self {
+            entity: KTimerEntity::new(duration),
+            thread_ctx,
+        }
+    }
+
+    pub fn entity_mut(&mut self) -> *mut KTimerEntity {
+        ptr::addr_of_mut!(self.entity)
+    }
+
+    pub fn thread_ctx(&self) -> *mut ThreadCtx {
+        self.thread_ctx
+    }
+
+    pub fn init_thread_ctx(&mut self, thread_ctx: *mut ThreadCtx) {
+        self.thread_ctx = thread_ctx;
+    }
+
+    pub fn set_thread_ctx(&mut self, thread_ctx: *mut ThreadCtx) {
+        self.init_thread_ctx(thread_ctx);
     }
 }
 
@@ -122,6 +146,7 @@ pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
 pub unsafe fn init_ktimer_queue() {
     interrupt::free(|_| unsafe {
         *KTIMER_QUEUE.get() = KTimerQueue::new();
+        CFS_KTIMER_ENTITY = ptr::null_mut();
     });
 }
 
@@ -168,10 +193,18 @@ pub(crate) fn next_ktimer() -> *mut KTimerEntity {
     interrupt::free(|_| unsafe { NEXT_KTIMER })
 }
 
-pub(crate) fn update_next_ktimer_to_first() {
+pub(crate) unsafe fn register_cfs_ktimer(entity: *mut KTimerEntity) {
     interrupt::free(|_| unsafe {
-        NEXT_KTIMER = (*KTIMER_QUEUE.get()).first();
+        CFS_KTIMER_ENTITY = entity;
     });
+}
+
+pub(crate) fn is_cfs_ktimer(entity: *const KTimerEntity) -> bool {
+    interrupt::free(|_| unsafe { !entity.is_null() && entity == CFS_KTIMER_ENTITY.cast_const() })
+}
+
+fn cfs_ktimer() -> *mut KTimerEntity {
+    unsafe { CFS_KTIMER_ENTITY }
 }
 
 pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut ThreadCtx) -> bool {
@@ -181,7 +214,7 @@ pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut ThreadCtx) -> bool {
 
         while !entity.is_null() {
             let next = queue.next(entity);
-            if (*entity).timer_type() == KTimerType::Rt && (*entity).thread() == thread {
+            if !is_cfs_ktimer(entity) && (*KTimerEntity::rt_ktimer(entity)).thread_ctx() == thread {
                 queue.remove(entity);
                 (*entity).set_deadline((*entity).duration());
                 queue.insert(entity);
@@ -194,26 +227,25 @@ pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut ThreadCtx) -> bool {
     })
 }
 
-pub(crate) unsafe fn yield_rt_ktimer(thread: *mut ThreadCtx, elapsed: u32) -> bool {
+pub(crate) unsafe fn yield_rt_ktimer(thread: *mut ThreadCtx, elapsed: u32) -> *mut KTimerEntity {
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
         let Some(entity) = queue.pop_first() else {
-            return false;
+            return ptr::null_mut();
         };
         let entity = entity as *mut KTimerEntity;
 
-        //debug_assert!((*entity).timer_type() == KTimerType::Rt);
-        //debug_assert!((*entity).thread() == thread);
-
-        if (*entity).timer_type() != KTimerType::Rt || (*entity).thread() != thread {
+        if is_cfs_ktimer(entity) || (*KTimerEntity::rt_ktimer(entity)).thread_ctx() != thread {
             queue.insert(entity);
-            return false;
+            let next = queue.first_active();
+            return if next.is_null() { cfs_ktimer() } else { next };
         }
 
-        (*entity).set_deadline((*entity).duration() - elapsed);
+        (*entity).set_deadline((*entity).duration().saturating_sub(elapsed));
         queue.advance(elapsed);
         queue.insert(entity);
-        true
+        let next = queue.first_active();
+        if next.is_null() { cfs_ktimer() } else { next }
     })
 }
 
