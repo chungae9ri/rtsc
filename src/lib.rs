@@ -10,13 +10,13 @@ mod thread;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
-    AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadControlBlock, ThreadState, forkyi,
+    AlignedStack, CfsThread, RtThread, ThreadControlBlock, ThreadCtx, ThreadState, forkyi,
     reset_current_rt_deadline, yieldyi,
 };
 
 pub use ktimer::{
-    KTimerEntity, KTimerQueue, KTimerType, enqueue_ktimer, init_ktimer_queue, next_ktimer_deadline,
-    next_ktimer_reload, reload_from_ticks,
+    CfsKTimer, KTimerEntity, KTimerQueue, RtKTimer, enqueue_ktimer, init_ktimer_queue,
+    next_ktimer_deadline, next_ktimer_reload, reload_from_ticks,
 };
 
 pub use sched::{

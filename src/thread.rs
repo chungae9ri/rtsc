@@ -9,7 +9,7 @@ use core::ptr;
 use cortex_m::{interrupt, peripheral::SCB};
 
 use crate::ktimer::{
-    elapsed_ticks_since_current_reload, reset_rt_ktimer_deadline, update_next_ktimer_to_first,
+    elapsed_ticks_since_current_reload, reset_rt_ktimer_deadline, update_next_ktimer,
     yield_rt_ktimer,
 };
 use crate::sched::{
@@ -215,7 +215,7 @@ pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *
     unsafe { ptr::addr_of_mut!((*cfs_thread).thread) }
 }
 
-unsafe fn rt_thread_from_thread(thread: *mut ThreadCtx) -> *mut RtThread {
+unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
     debug_assert!(!thread.is_null());
 
     (thread as *mut u8)
@@ -251,10 +251,10 @@ pub fn yieldyi() {
         }
 
         let elapsed = elapsed_ticks_since_current_reload();
-        let current_rt_thread = rt_thread_from_thread(CURRENT_THREAD_CTX);
+        let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
         (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
-        yield_rt_ktimer(CURRENT_THREAD_CTX, elapsed);
-        update_next_ktimer_to_first();
+        let next_ktimer = yield_rt_ktimer(CURRENT_THREAD_CTX, elapsed);
+        update_next_ktimer(next_ktimer);
 
         SCB::set_pendsv();
     });
