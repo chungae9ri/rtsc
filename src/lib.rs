@@ -9,17 +9,11 @@ mod sched;
 mod thread;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
-pub use thread::{
-    AlignedStack, CfsThread, RtThread, ThreadControlBlock, ThreadCtx, ThreadState, forkyi,
-    reset_current_rt_deadline, yieldyi,
-};
+pub use thread::{AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadState, forkyi, yieldyi};
 
-pub use ktimer::{
-    CfsKTimer, KTimerEntity, KTimerQueue, RtKTimer, enqueue_ktimer, init_ktimer_queue,
-    next_ktimer_deadline, next_ktimer_reload, reload_from_ticks,
-};
+pub use ktimer::{KTimerEntity, RtKTimer, enqueue_ktimer, init_ktimer_queue, next_ktimer_reload};
 
 pub use sched::{
-    SchedEntity, dequeue_thread, enqueue_thread, handle_systick, init_cfs, init_current,
+    WaitThreadMapError, dequeue_to_wait_map, enqueue_from_wait_map, handle_systick, init_cfs,
     spawn_main_thread, traverse_run_queue,
 };
