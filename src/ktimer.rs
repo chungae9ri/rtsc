@@ -254,26 +254,6 @@ unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
     cfs
 }
 
-pub(crate) unsafe fn reset_rt_ktimer_deadline(thread: *mut ThreadCtx) -> bool {
-    interrupt::free(|_| unsafe {
-        let queue = &mut *KTIMER_QUEUE.get();
-        let mut entity = queue.first();
-
-        while !entity.is_null() {
-            let next = queue.next(entity);
-            if !is_cfs_ktimer(entity) && (*KTimerEntity::rt_ktimer(entity)).thread_ctx() == thread {
-                queue.remove(entity);
-                (*entity).set_deadline((*entity).duration());
-                queue.insert(entity);
-                return true;
-            }
-            entity = next;
-        }
-
-        false
-    })
-}
-
 pub(crate) unsafe fn yield_ktimer(elapsed: u32) -> *mut KTimerEntity {
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();

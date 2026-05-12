@@ -8,9 +8,7 @@ use core::ptr;
 
 use cortex_m::{interrupt, peripheral::SCB};
 
-use crate::ktimer::{
-    elapsed_ticks_since_current_reload, reset_rt_ktimer_deadline, update_next_ktimer, yield_ktimer,
-};
+use crate::ktimer::{elapsed_ticks_since_current_reload, update_next_ktimer, yield_ktimer};
 use crate::sched::{
     CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS, SchedEntity, enqueue_thread, thread_is_cfs,
 };
@@ -220,21 +218,6 @@ unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
     (thread as *mut u8)
         .wrapping_sub(offset_of!(RtThread, thread))
         .cast::<RtThread>()
-}
-
-/// Set the current RT thread's ktimer deadline back to its duration.
-///
-/// Returns `true` when the current thread is RT and has an RT ktimer in the
-/// ktimer queue. Returns `false` before a current thread exists, for CFS
-/// threads, or when no RT ktimer is associated with the current thread.
-pub fn reset_current_rt_deadline() -> bool {
-    unsafe {
-        if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
-            return false;
-        }
-
-        reset_rt_ktimer_deadline(CURRENT_THREAD_CTX)
-    }
 }
 
 /// Cooperatively yield the CPU from the running RT thread to the

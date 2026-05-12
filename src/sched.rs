@@ -16,10 +16,8 @@ use crate::ktimer::{
 };
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{
-    ThreadControlBlock, ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
-    yieldyi,
+    ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity, yieldyi,
 };
-//use rtt_target::rprintln;
 
 pub(crate) static mut CFS_TIMER_ENTITY: CfsKTimer = CfsKTimer::new(0, 0);
 pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
@@ -52,6 +50,112 @@ impl RunQueue {
 }
 
 unsafe impl Sync for RunQueue {}
+
+#[allow(dead_code)]
+pub const WAIT_THREAD_MAP_CAPACITY: usize = 32;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WaitThreadMapError {
+    Full,
+    NotFound,
+    NullThread,
+}
+
+#[derive(Clone, Copy)]
+struct WaitThreadEntry {
+    id: u32,
+    thread: *mut ThreadCtx,
+    occupied: bool,
+}
+
+impl WaitThreadEntry {
+    const fn empty() -> Self {
+        Self {
+            id: 0,
+            thread: ptr::null_mut(),
+            occupied: false,
+        }
+    }
+}
+
+struct WaitThreadMap {
+    entries: UnsafeCell<[WaitThreadEntry; WAIT_THREAD_MAP_CAPACITY]>,
+}
+
+impl WaitThreadMap {
+    const fn new() -> Self {
+        Self {
+            entries: UnsafeCell::new([WaitThreadEntry::empty(); WAIT_THREAD_MAP_CAPACITY]),
+        }
+    }
+
+    unsafe fn insert(&self, thread: *mut ThreadCtx) -> Result<(), WaitThreadMapError> {
+        if thread.is_null() {
+            return Err(WaitThreadMapError::NullThread);
+        }
+
+        let entries = unsafe { &mut *self.entries.get() };
+        let id = unsafe { (*thread).id };
+        let mut free_slot = None;
+
+        for (index, entry) in entries.iter_mut().enumerate() {
+            if entry.occupied {
+                if entry.id == id {
+                    entry.thread = thread;
+                    return Ok(());
+                }
+            } else if free_slot.is_none() {
+                free_slot = Some(index);
+            }
+        }
+
+        let Some(index) = free_slot else {
+            return Err(WaitThreadMapError::Full);
+        };
+
+        entries[index] = WaitThreadEntry {
+            id,
+            thread,
+            occupied: true,
+        };
+        Ok(())
+    }
+
+    unsafe fn remove(&self, id: u32) -> Option<*mut ThreadCtx> {
+        let entries = unsafe { &mut *self.entries.get() };
+
+        for entry in entries.iter_mut() {
+            if entry.occupied && entry.id == id {
+                let thread = entry.thread;
+                *entry = WaitThreadEntry::empty();
+                return Some(thread);
+            }
+        }
+
+        None
+    }
+}
+
+unsafe impl Sync for WaitThreadMap {}
+
+static WAIT_THREAD_MAP: WaitThreadMap = WaitThreadMap::new();
+
+unsafe fn runq_thread_by_id(id: u32) -> *mut ThreadCtx {
+    unsafe {
+        let tree = &*CFS_RUN_QUEUE.get();
+        let mut entity = tree.first();
+
+        while !entity.is_null() {
+            let thread = thread_from_cfs_sched_entity(entity);
+            if (*thread).id == id {
+                return thread;
+            }
+            entity = tree.next(entity);
+        }
+
+        ptr::null_mut()
+    }
+}
 
 /// Scheduler entity used as the tree node and ordering key.
 ///
@@ -140,13 +244,6 @@ unsafe impl RBTreeNode for SchedEntity {
                 other => other,
             }
         }
-    }
-}
-
-pub unsafe fn init_current<T: ThreadControlBlock>(thread: *mut T) {
-    unsafe {
-        CURRENT_THREAD_CTX = thread.cast::<ThreadCtx>();
-        CURRENT_THREAD_IS_CFS = T::IS_CFS;
     }
 }
 
@@ -274,6 +371,7 @@ pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
 }
 
 /// Remove a thread from the scheduler run queue if it is currently queued.
+#[allow(dead_code)]
 pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
     unsafe {
         if (*thread).state == ThreadState::Ready {
@@ -282,6 +380,45 @@ pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
             *CFS_RUN_QUEUE.priority_sum() -= (*entity).priority;
         }
     }
+}
+
+pub fn dequeue_to_wait_map(id: u32) -> Result<(), WaitThreadMapError> {
+    cortex_m::interrupt::free(|_| unsafe {
+        let thread = runq_thread_by_id(id);
+        if thread.is_null() {
+            return Err(WaitThreadMapError::NotFound);
+        }
+
+        let entity = cfs_sched_entity(thread);
+        (*CFS_RUN_QUEUE.get()).remove(entity);
+        *CFS_RUN_QUEUE.priority_sum() -= (*entity).priority;
+        (*thread).state = ThreadState::Blocked;
+
+        if let Err(err) = WAIT_THREAD_MAP.insert(thread) {
+            (*thread).state = ThreadState::Ready;
+            (*CFS_RUN_QUEUE.get()).insert(entity);
+            *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
+            return Err(err);
+        }
+
+        Ok(())
+    })
+}
+
+pub fn enqueue_from_wait_map(id: u32) -> Result<(), WaitThreadMapError> {
+    cortex_m::interrupt::free(|_| unsafe {
+        let Some(thread) = WAIT_THREAD_MAP.remove(id) else {
+            return Err(WaitThreadMapError::NotFound);
+        };
+
+        (*thread).state = ThreadState::Ready;
+        let entity = cfs_sched_entity(thread);
+        (*entity).reset_links();
+        (*CFS_RUN_QUEUE.get()).insert(entity);
+        *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
+
+        Ok(())
+    })
 }
 
 // Switch to the first thread which was set up by `forkyi`.
