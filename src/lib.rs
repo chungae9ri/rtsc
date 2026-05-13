@@ -5,15 +5,21 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod ktimer;
 mod rbtree;
+mod runq;
 mod sched;
 mod thread;
+mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadState, forkyi, yieldyi};
 
-pub use ktimer::{KTimerEntity, RtKTimer, enqueue_ktimer, init_ktimer_queue, next_ktimer_reload};
-
-pub use sched::{
-    WaitThreadMapError, dequeue_to_wait_map, enqueue_from_wait_map, handle_systick, init_cfs,
-    spawn_main_thread, traverse_run_queue,
+pub use ktimer::{
+    KTimerEntity, RtKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer, enqueue_ktimerq_from_waitq,
+    init_ktimer_queue, next_ktimer_reload,
 };
+
+pub use runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq, traverse_run_queue};
+
+pub use sched::{handle_systick, init_cfs, spawn_main_thread};
+
+pub use waitq::WaitQueueError;
