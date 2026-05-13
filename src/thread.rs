@@ -8,10 +8,12 @@ use core::ptr;
 
 use cortex_m::{interrupt, peripheral::SCB};
 
-use crate::ktimer::{elapsed_ticks_since_current_reload, update_next_ktimer, yield_ktimer};
-use crate::sched::{
-    CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS, SchedEntity, enqueue_thread, thread_is_cfs,
+use crate::ktimer::{
+    KTimerEntity, elapsed_ticks_since_current_reload, update_next_ktimer, yield_ktimer,
 };
+use crate::runq::{SchedEntity, enqueue_thread, thread_is_cfs};
+use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
+use crate::waitq::WaitEntity;
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -56,6 +58,8 @@ pub struct ThreadCtx {
     pub name: &'static str,
     /// Current lifecycle state used by the scheduler.
     pub state: ThreadState,
+    /// Scheduler class for the concrete thread control block.
+    pub is_cfs: bool,
 }
 
 impl ThreadCtx {
@@ -75,6 +79,8 @@ pub struct CfsThread {
     /// Common context. This must remain the first field because assembly and
     /// timer code use `*mut ThreadCtx` as the shared thin pointer type.
     pub thread: ThreadCtx,
+    /// Wait entity used for wait-queue ordering.
+    pub wait_entity: WaitEntity,
     /// Scheduler entity used for CFS run-queue ordering.
     pub sched_entity: SchedEntity,
 }
@@ -85,6 +91,9 @@ pub struct RtThread {
     /// Common context. This must remain the first field because assembly and
     /// timer code use `*mut ThreadCtx` as the shared thin pointer type.
     pub thread: ThreadCtx,
+    /// Wait entity used for wait-queue ordering.
+    pub wait_entity: WaitEntity,
+    ktimer_entity: *mut KTimerEntity,
     pub runtime: u32,
 }
 
@@ -109,6 +118,7 @@ impl ThreadControlBlock for CfsThread {
                 thread,
                 CfsThread {
                     thread: common,
+                    wait_entity: WaitEntity::new(),
                     sched_entity: SchedEntity::new(priority),
                 },
             );
@@ -128,6 +138,8 @@ impl ThreadControlBlock for RtThread {
                 thread,
                 RtThread {
                     thread: common,
+                    wait_entity: WaitEntity::new(),
+                    ktimer_entity: ptr::null_mut(),
                     runtime: 0,
                 },
             );
@@ -187,6 +199,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
             id,
             name,
             state: ThreadState::Ready,
+            is_cfs: T::IS_CFS,
         };
         T::init(thread, common, priority)
     }
@@ -210,6 +223,66 @@ pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *
         .cast::<CfsThread>();
 
     unsafe { ptr::addr_of_mut!((*cfs_thread).thread) }
+}
+
+pub(crate) unsafe fn cfs_wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
+    debug_assert!(!thread.is_null());
+
+    let cfs_thread = (thread as *mut u8)
+        .wrapping_sub(offset_of!(CfsThread, thread))
+        .cast::<CfsThread>();
+
+    unsafe { ptr::addr_of_mut!((*cfs_thread).wait_entity) }
+}
+
+pub(crate) unsafe fn rt_wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
+    debug_assert!(!thread.is_null());
+
+    let rt_thread = (thread as *mut u8)
+        .wrapping_sub(offset_of!(RtThread, thread))
+        .cast::<RtThread>();
+
+    unsafe { ptr::addr_of_mut!((*rt_thread).wait_entity) }
+}
+
+pub(crate) unsafe fn rt_ktimer_entity(thread: *mut ThreadCtx) -> *mut KTimerEntity {
+    debug_assert!(!thread.is_null());
+
+    let rt_thread = (thread as *mut u8)
+        .wrapping_sub(offset_of!(RtThread, thread))
+        .cast::<RtThread>();
+
+    unsafe { (*rt_thread).ktimer_entity }
+}
+
+pub(crate) unsafe fn set_rt_ktimer_entity(
+    thread: *mut ThreadCtx,
+    ktimer_entity: *mut KTimerEntity,
+) {
+    debug_assert!(!thread.is_null());
+
+    let rt_thread = (thread as *mut u8)
+        .wrapping_sub(offset_of!(RtThread, thread))
+        .cast::<RtThread>();
+
+    unsafe {
+        (*rt_thread).ktimer_entity = ktimer_entity;
+    }
+}
+
+pub(crate) unsafe fn thread_from_wait_entity(entity: *mut WaitEntity) -> *mut ThreadCtx {
+    debug_assert!(!entity.is_null());
+
+    debug_assert_eq!(
+        offset_of!(CfsThread, wait_entity),
+        offset_of!(RtThread, wait_entity)
+    );
+
+    let thread = (entity as *mut u8)
+        .wrapping_sub(offset_of!(CfsThread, wait_entity))
+        .cast::<CfsThread>();
+
+    unsafe { ptr::addr_of_mut!((*thread).thread) }
 }
 
 unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
