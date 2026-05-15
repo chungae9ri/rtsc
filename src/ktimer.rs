@@ -13,13 +13,15 @@ use core::ptr;
 use cortex_m::{interrupt, peripheral::SYST};
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
+use crate::sched::CFS_KTIMER;
 use crate::thread::{ThreadCtx, ThreadState, rt_ktimer_entity, set_rt_ktimer_entity};
 use crate::waitq::{WaitQueueError, insert_wait_thread, remove_wait_thread, waitq_thread_by_id};
 
-pub const SYSTICK_RELOAD_MAX: u32 = 0x00FF_FFFF;
+pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
+pub const CM_SYSTICK_RELOAD_MAX: u32 = (1 << CM_SYSTICK_RELOAD_BITS) - 1;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
-static mut CFS_KTIMER_ENTITY: *mut KTimerEntity = ptr::null_mut();
+static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::new(0);
 
 struct GlobalKTimerQueue {
     queue: UnsafeCell<KTimerQueue>,
@@ -107,15 +109,15 @@ impl KTimerEntity {
 #[repr(C)]
 pub struct CfsKTimer {
     pub entity: KTimerEntity,
-    pub execution_time: u32,
+    pub execution_ticks: u32,
     pub runtime: u32,
 }
 
 impl CfsKTimer {
-    pub const fn new(duration: u32, execution_time: u32) -> Self {
+    pub const fn new(duration: u32, execution_ticks: u32) -> Self {
         Self {
             entity: KTimerEntity::new(duration),
-            execution_time: execution_time,
+            execution_ticks,
             runtime: 0,
         }
     }
@@ -128,8 +130,8 @@ impl CfsKTimer {
         self.runtime
     }
 
-    pub fn execution_time(&self) -> u32 {
-        self.execution_time
+    pub fn execution_ticks(&self) -> u32 {
+        self.execution_ticks
     }
 
     pub fn add_runtime(&mut self, elapsed: u32) {
@@ -138,6 +140,23 @@ impl CfsKTimer {
 
     pub fn reset_runtime(&mut self) {
         self.runtime = 0;
+    }
+}
+
+#[repr(C)]
+pub struct WaitKTimer {
+    pub entity: KTimerEntity,
+}
+
+impl WaitKTimer {
+    pub const fn new(duration: u32) -> Self {
+        Self {
+            entity: KTimerEntity::new(duration),
+        }
+    }
+
+    pub fn entity_mut(&mut self) -> *mut KTimerEntity {
+        ptr::addr_of_mut!(self.entity)
     }
 }
 
@@ -183,13 +202,14 @@ impl RtKTimer {
 pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
     ticks
         .checked_sub(1)
-        .filter(|&reload| reload <= SYSTICK_RELOAD_MAX)
+        .filter(|&reload| reload <= CM_SYSTICK_RELOAD_MAX)
 }
 
 pub unsafe fn init_ktimer_queue() {
     interrupt::free(|_| unsafe {
-        *KTIMER_QUEUE.get() = KTimerQueue::new();
-        CFS_KTIMER_ENTITY = ptr::null_mut();
+        ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
+        ptr::write(&raw mut NEXT_KTIMER, ptr::null_mut());
+        ptr::write(&raw mut WAIT_KTIMER, WaitKTimer::new(0));
     });
 }
 
@@ -267,7 +287,7 @@ pub fn dequeue_ktimerq_to_waitq(id: u32) -> Result<(), WaitQueueError> {
         }
 
         remove_ktimer(ktimer_entity);
-        (*thread).state = ThreadState::Blocked;
+        (*thread).state = ThreadState::Waiting;
 
         insert_wait_thread(thread);
 
@@ -332,18 +352,12 @@ pub(crate) fn next_ktimer() -> *mut KTimerEntity {
     interrupt::free(|_| unsafe { NEXT_KTIMER })
 }
 
-pub(crate) unsafe fn register_cfs_ktimer(entity: *mut KTimerEntity) {
-    interrupt::free(|_| unsafe {
-        CFS_KTIMER_ENTITY = entity;
-    });
-}
-
 pub(crate) fn is_cfs_ktimer(entity: *const KTimerEntity) -> bool {
-    interrupt::free(|_| unsafe { !entity.is_null() && entity == CFS_KTIMER_ENTITY.cast_const() })
+    !entity.is_null() && entity == cfs_ktimer().cast_const()
 }
 
 fn cfs_ktimer() -> *mut KTimerEntity {
-    unsafe { CFS_KTIMER_ENTITY }
+    unsafe { ptr::addr_of_mut!(CFS_KTIMER.entity) }
 }
 
 unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
@@ -389,7 +403,7 @@ pub(crate) fn program_next_systick() -> Option<u32> {
         }
 
         let reload = if is_cfs_ktimer(entity) {
-            (*KTimerEntity::cfs_ktimer(entity)).execution_time()
+            (*KTimerEntity::cfs_ktimer(entity)).execution_ticks()
         } else {
             (*entity).duration()
         };

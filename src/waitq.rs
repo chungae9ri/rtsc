@@ -34,7 +34,7 @@ unsafe impl Sync for WaitQueue {}
 pub(crate) static WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
 pub struct WaitEntity {
-    pub waittime: u32,
+    pub wait_ticks: u32,
     pub waitevt: u32,
     rb_node: RbNode,
 }
@@ -42,7 +42,7 @@ pub struct WaitEntity {
 impl WaitEntity {
     pub const fn new() -> Self {
         Self {
-            waittime: 0,
+            wait_ticks: 0,
             waitevt: 0,
             rb_node: RbNode::new(),
         }
@@ -88,7 +88,7 @@ unsafe impl RBTreeNode for WaitEntity {
 
     unsafe fn cmp(a: *const Self, b: *const Self) -> core::cmp::Ordering {
         unsafe {
-            match (*a).waittime.cmp(&(*b).waittime) {
+            match (*a).wait_ticks.cmp(&(*b).wait_ticks) {
                 core::cmp::Ordering::Equal => match (*a).waitevt.cmp(&(*b).waitevt) {
                     core::cmp::Ordering::Equal => (a as usize).cmp(&(b as usize)),
                     other => other,
