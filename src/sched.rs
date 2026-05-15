@@ -10,14 +10,14 @@ use cortex_m::peripheral::SCB;
 use crate::ktimer::{
     CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
-    program_next_systick, register_cfs_ktimer, update_next_ktimer,
+    program_next_systick, update_next_ktimer,
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
 use crate::thread::{
     ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity, yieldyi,
 };
 
-pub(crate) static mut CFS_TIMER_ENTITY: CfsKTimer = CfsKTimer::new(0, 0);
+pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0);
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 pub(crate) static mut CURRENT_THREAD_IS_CFS: bool = false;
@@ -47,9 +47,8 @@ pub unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
 pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     unsafe {
         init_cfs_rq();
-        CFS_TIMER_ENTITY = CfsKTimer::new(period_ticks, exec_ticks);
-        let cfs_ktimer = (*ptr::addr_of_mut!(CFS_TIMER_ENTITY)).entity_mut();
-        register_cfs_ktimer(cfs_ktimer);
+        CFS_KTIMER = CfsKTimer::new(period_ticks, exec_ticks);
+        let cfs_ktimer = (*ptr::addr_of_mut!(CFS_KTIMER)).entity_mut();
         enqueue_ktimer(cfs_ktimer);
     }
 }
@@ -227,9 +226,9 @@ pub fn handle_systick() {
 
     unsafe {
         if CURRENT_THREAD_IS_CFS {
-            let cfs_timer = ptr::addr_of_mut!(CFS_TIMER_ENTITY);
+            let cfs_timer = ptr::addr_of_mut!(CFS_KTIMER);
             (*cfs_timer).add_runtime(elapsed - 1);
-            if (*cfs_timer).runtime() >= (*cfs_timer).execution_time() {
+            if (*cfs_timer).runtime() >= (*cfs_timer).execution_ticks() {
                 (*cfs_timer).reset_runtime();
                 yieldyi();
                 return;

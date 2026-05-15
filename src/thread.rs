@@ -8,10 +8,12 @@ use core::ptr;
 
 use cortex_m::{interrupt, peripheral::SCB};
 
+use crate::clock::ticks_per_ms;
 use crate::ktimer::{
-    KTimerEntity, elapsed_ticks_since_current_reload, update_next_ktimer, yield_ktimer,
+    KTimerEntity, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload, update_next_ktimer,
+    yield_ktimer,
 };
-use crate::runq::{SchedEntity, enqueue_thread, thread_is_cfs};
+use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::waitq::WaitEntity;
 
@@ -30,9 +32,7 @@ pub enum ThreadState {
     /// The thread is currently executing on the CPU.
     Running,
     /// The thread cannot run until an external event or resource becomes ready.
-    Blocked,
-    /// The thread has been paused explicitly and will not be scheduled.
-    Suspended,
+    Waiting,
 }
 
 /// 8-byte aligned stack storage for Cortex-M thread contexts.
@@ -296,9 +296,8 @@ unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
 /// Cooperatively yield the CPU from the running RT thread to the
 /// next scheduled left-most timer in the KTimer rbtree.
 ///
-/// This is intended for RT threads that have completed their current
-/// job and want to give a chance to next scheduled thread (either CFS or RT).
-/// Calling this from a non-RT thread is a no-op.
+/// This is intended for the threads that have completed their current
+/// job and want to give a chance to next scheduled thread.
 pub fn yieldyi() {
     interrupt::free(|_| unsafe {
         let elapsed = elapsed_ticks_since_current_reload();
@@ -308,6 +307,36 @@ pub fn yieldyi() {
         }
         let next_ktimer = yield_ktimer(elapsed);
         update_next_ktimer(next_ktimer);
+
+        SCB::set_pendsv();
+    });
+}
+
+pub fn msleepyi(msec: u32) {
+    interrupt::free(|_| unsafe {
+        if !CURRENT_THREAD_IS_CFS {
+            let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            (*current_rt_thread).runtime = (*current_rt_thread)
+                .runtime
+                .saturating_add(elapsed_ticks_since_current_reload());
+        }
+        let next_ktimer = yield_ktimer(0);
+        update_next_ktimer(next_ktimer);
+
+        let wait_entity = if CURRENT_THREAD_IS_CFS {
+            cfs_wait_entity(CURRENT_THREAD_CTX)
+        } else {
+            rt_wait_entity(CURRENT_THREAD_CTX)
+        };
+        (*wait_entity).wait_ticks = msec.saturating_mul(ticks_per_ms());
+        (*wait_entity).waitevt = 0;
+
+        let id = (*CURRENT_THREAD_CTX).id;
+        if CURRENT_THREAD_IS_CFS {
+            let _ = dequeue_runq_to_waitq(id);
+        } else {
+            let _ = dequeue_ktimerq_to_waitq(id);
+        }
 
         SCB::set_pendsv();
     });

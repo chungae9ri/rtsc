@@ -3,6 +3,7 @@
 /// Crate version taken from Cargo metadata at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+mod clock;
 pub mod ktimer;
 mod rbtree;
 mod runq;
@@ -11,11 +12,15 @@ mod thread;
 mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
-pub use thread::{AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadState, forkyi, yieldyi};
+pub use thread::{
+    AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadState, forkyi, msleepyi, yieldyi,
+};
+
+pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
 
 pub use ktimer::{
-    KTimerEntity, RtKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer, enqueue_ktimerq_from_waitq,
-    init_ktimer_queue, next_ktimer_reload,
+    KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer,
+    enqueue_ktimerq_from_waitq, init_ktimer_queue, next_ktimer_reload,
 };
 
 pub use runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq, traverse_run_queue};

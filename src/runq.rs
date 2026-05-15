@@ -262,7 +262,7 @@ pub fn dequeue_runq_to_waitq(id: u32) -> Result<(), WaitQueueError> {
             (*CFS_RUN_QUEUE.get()).remove(entity);
             *CFS_RUN_QUEUE.priority_sum() -= (*entity).priority;
         }
-        (*thread).state = ThreadState::Blocked;
+        (*thread).state = ThreadState::Waiting;
 
         insert_wait_thread(thread);
 
