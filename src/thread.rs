@@ -311,3 +311,33 @@ pub fn yieldyi() {
         SCB::set_pendsv();
     });
 }
+
+pub fn msleepyi(msec: u32) {
+    interrupt::free(|_| unsafe {
+        if !CURRENT_THREAD_IS_CFS {
+            let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            (*current_rt_thread).runtime = (*current_rt_thread)
+                .runtime
+                .saturating_add(elapsed_ticks_since_current_reload());
+        }
+        let next_ktimer = yield_ktimer(0);
+        update_next_ktimer(next_ktimer);
+
+        let wait_entity = if CURRENT_THREAD_IS_CFS {
+            cfs_wait_entity(CURRENT_THREAD_CTX)
+        } else {
+            rt_wait_entity(CURRENT_THREAD_CTX)
+        };
+        (*wait_entity).wait_ticks = msec.saturating_mul(ticks_per_ms());
+        (*wait_entity).waitevt = 0;
+
+        let id = (*CURRENT_THREAD_CTX).id;
+        if CURRENT_THREAD_IS_CFS {
+            let _ = dequeue_runq_to_waitq(id);
+        } else {
+            let _ = dequeue_ktimerq_to_waitq(id);
+        }
+
+        SCB::set_pendsv();
+    });
+}
