@@ -17,7 +17,7 @@ use crate::thread::{
     ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity, yieldyi,
 };
 
-pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0);
+pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 pub(crate) static mut CURRENT_THREAD_IS_CFS: bool = false;
@@ -47,7 +47,7 @@ pub unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
 pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     unsafe {
         init_cfs_rq();
-        CFS_KTIMER = CfsKTimer::new(period_ticks, exec_ticks);
+        CFS_KTIMER = CfsKTimer::new(period_ticks, exec_ticks, "cfs");
         let cfs_ktimer = (*ptr::addr_of_mut!(CFS_KTIMER)).entity_mut();
         enqueue_ktimer(cfs_ktimer);
     }

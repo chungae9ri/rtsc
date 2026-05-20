@@ -20,7 +20,8 @@ pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
 
 pub use ktimer::{
     KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer,
-    enqueue_ktimerq_from_waitq, init_ktimer_queue, next_ktimer_reload,
+    enqueue_ktimerq_from_waitq, init_ktimer_queue, next_ktimer_reload, traverse_ktimer_queue,
+    traverse_ktimer_queue_fn,
 };
 
 pub use runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq, traverse_run_queue};
