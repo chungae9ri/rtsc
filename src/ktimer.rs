@@ -11,6 +11,7 @@ use core::mem::offset_of;
 use core::ptr;
 
 use cortex_m::{interrupt, peripheral::SYST};
+use rtt_target::rprintln;
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::sched::CFS_KTIMER;
@@ -21,7 +22,7 @@ pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
 pub const CM_SYSTICK_RELOAD_MAX: u32 = (1 << CM_SYSTICK_RELOAD_BITS) - 1;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
-static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::new(0);
+pub(crate) static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::inactive();
 
 struct GlobalKTimerQueue {
     queue: UnsafeCell<KTimerQueue>,
@@ -109,14 +110,16 @@ impl KTimerEntity {
 #[repr(C)]
 pub struct CfsKTimer {
     pub entity: KTimerEntity,
+    pub name: &'static str,
     pub execution_ticks: u32,
     pub runtime: u32,
 }
 
 impl CfsKTimer {
-    pub const fn new(duration: u32, execution_ticks: u32) -> Self {
+    pub const fn new(duration: u32, execution_ticks: u32, name: &'static str) -> Self {
         Self {
             entity: KTimerEntity::new(duration),
+            name,
             execution_ticks,
             runtime: 0,
         }
@@ -146,12 +149,26 @@ impl CfsKTimer {
 #[repr(C)]
 pub struct WaitKTimer {
     pub entity: KTimerEntity,
+    pub name: &'static str,
 }
 
 impl WaitKTimer {
-    pub const fn new(duration: u32) -> Self {
+    pub const fn new(duration: u32, name: &'static str) -> Self {
         Self {
             entity: KTimerEntity::new(duration),
+            name,
+        }
+    }
+
+    pub const fn inactive() -> Self {
+        Self {
+            entity: KTimerEntity {
+                duration: CM_SYSTICK_RELOAD_MAX,
+                deadline: CM_SYSTICK_RELOAD_MAX,
+                node: RbNode::new(),
+                active: false,
+            },
+            name: "wait",
         }
     }
 
@@ -163,13 +180,15 @@ impl WaitKTimer {
 #[repr(C)]
 pub struct RtKTimer {
     pub entity: KTimerEntity,
+    pub name: &'static str,
     thread_ctx: *mut ThreadCtx,
 }
 
 impl RtKTimer {
-    pub const fn new(duration: u32, thread_ctx: *mut ThreadCtx) -> Self {
+    pub const fn new(duration: u32, thread_ctx: *mut ThreadCtx, name: &'static str) -> Self {
         Self {
             entity: KTimerEntity::new(duration),
+            name,
             thread_ctx,
         }
     }
@@ -209,7 +228,7 @@ pub unsafe fn init_ktimer_queue() {
     interrupt::free(|_| unsafe {
         ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
         ptr::write(&raw mut NEXT_KTIMER, ptr::null_mut());
-        ptr::write(&raw mut WAIT_KTIMER, WaitKTimer::new(0));
+        ptr::write(&raw mut WAIT_KTIMER, WaitKTimer::inactive());
     });
 }
 
@@ -348,6 +367,37 @@ pub(crate) unsafe fn update_next_ktimer(entity: *mut KTimerEntity) {
     });
 }
 
+pub fn traverse_ktimer_queue() {
+    interrupt::free(|_| unsafe {
+        let queue = &*KTIMER_QUEUE.get();
+        let mut entity = queue.first();
+
+        rprintln!("ktimer queue:");
+        while !entity.is_null() {
+            rprintln!("{} ktimer's deadline={}", ktimer_name(entity), (*entity).deadline());
+            entity = queue.next(entity);
+        }
+    });
+}
+
+/// Traverse the ktimer queue and invoke `f` for each ktimer with its name
+/// and deadline. This is similar to `traverse_ktimer_queue` but allows the
+/// caller to handle formatting/output (for example, writing to UART).
+pub fn traverse_ktimer_queue_fn<F>(mut f: F)
+where
+    F: FnMut(&'static str, u32),
+{
+    interrupt::free(|_| unsafe {
+        let queue = &*KTIMER_QUEUE.get();
+        let mut entity = queue.first();
+
+        while !entity.is_null() {
+            f(ktimer_name(entity), (*entity).deadline());
+            entity = queue.next(entity);
+        }
+    });
+}
+
 pub(crate) fn next_ktimer() -> *mut KTimerEntity {
     interrupt::free(|_| unsafe { NEXT_KTIMER })
 }
@@ -358,6 +408,16 @@ pub(crate) fn is_cfs_ktimer(entity: *const KTimerEntity) -> bool {
 
 fn cfs_ktimer() -> *mut KTimerEntity {
     unsafe { ptr::addr_of_mut!(CFS_KTIMER.entity) }
+}
+#[allow(dead_code)]
+unsafe fn ktimer_name(entity: *const KTimerEntity) -> &'static str {
+    unsafe {
+        if is_cfs_ktimer(entity) {
+            (*ptr::addr_of_mut!(CFS_KTIMER)).name
+        } else {
+            (*KTimerEntity::rt_ktimer(entity.cast_mut())).name
+        }
+    }
 }
 
 unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
